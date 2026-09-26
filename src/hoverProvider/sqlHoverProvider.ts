@@ -103,14 +103,14 @@ export class SqlHoverProvider implements vscode.HoverProvider {
     //         and multi-line template literal with ${...} interpolations
     const patterns = [
       // multi-line template literal ([\s\S]+? matches across newlines)
-      /`((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[\s\S]+?)`/i,
+      /`(\s*(?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[\s\S]+?)`/i,
       /"((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[^"]+)"/i,
       /'((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[^']+)'/i,
     ];
     for (const pattern of patterns) {
       const m = pattern.exec(text);
       if (m) {
-        const sqlContent = m[1].replace(/\$\{[^}]*\}/g, '?'); // replace ${expr} with ? placeholder
+        const sqlContent = m[1].trim().replace(/\$\{[^}]*\}/g, '?'); // replace ${expr} with ? placeholder
         const matchStart = baseOffset + m.index + 1; // +1 to skip the opening quote
         const matchEnd = matchStart + m[1].length;
         return {
