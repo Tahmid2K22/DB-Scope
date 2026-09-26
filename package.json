@@ -1,0 +1,130 @@
+{
+  "name": "db-scope",
+  "displayName": "DB-Scope: ImpactLens for Databases",
+  "description": "AI-powered database lifecycle platform — blast radius analysis, real-time SQL diagnostics, schema merge conflict resolution, and duplicate detection.",
+  "version": "0.1.0",
+  "publisher": "db-scope-team",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other", "Linters", "Visualization"],
+  "keywords": ["database", "sql", "migration", "schema", "postgresql", "mysql", "oracle"],
+  "activationEvents": ["onLanguage:sql", "onLanguage:typescript", "onLanguage:javascript", "workspaceContains:**/*.sql"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dbscope.analyzeBlastRadius",
+        "title": "DB-Scope: Analyze Migration Blast Radius"
+      },
+      {
+        "command": "dbscope.detectDuplicates",
+        "title": "DB-Scope: Detect Logical Duplicates in Schema"
+      },
+      {
+        "command": "dbscope.mergeDatabases",
+        "title": "DB-Scope: Analyze Database Merge Conflicts"
+      },
+      {
+        "command": "dbscope.fetchContext",
+        "title": "DB-Scope: Fetch Database Context from Codebase"
+      },
+      {
+        "command": "dbscope.openDashboard",
+        "title": "DB-Scope: Open Dashboard"
+      },
+      {
+        "command": "dbscope.showHistory",
+        "title": "DB-Scope: Show Schema Evolution Timeline"
+      }
+    ],
+    "configuration": {
+      "title": "DB-Scope",
+      "properties": {
+        "dbscope.connectionString": {
+          "type": "string",
+          "default": "",
+          "description": "Database connection string (postgresql://user:pass@host:port/db)"
+        },
+        "dbscope.dbType": {
+          "type": "string",
+          "enum": ["postgresql", "mysql", "oracle"],
+          "default": "postgresql",
+          "description": "Database type"
+        },
+        "dbscope.riskThreshold": {
+          "type": "number",
+          "default": 7,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Risk score threshold (1-10) above which to block migrations"
+        },
+        "dbscope.autoFetchContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically fetch database context from codebase on workspace open"
+        },
+        "dbscope.diagnosticsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable real-time SQL diagnostics and warnings"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dbscope-sidebar",
+          "title": "DB-Scope",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dbscope-sidebar": [
+        {
+          "id": "dbscope.dashboardView",
+          "name": "Dashboard",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "dbscope.analyzeBlastRadius",
+          "when": "editorLangId == sql",
+          "group": "dbscope"
+        },
+        {
+          "command": "dbscope.detectDuplicates",
+          "when": "editorLangId == sql",
+          "group": "dbscope"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "pg": "^8.11.3",
+    "mysql2": "^3.6.5",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.10.9",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0"
+  }
+}
