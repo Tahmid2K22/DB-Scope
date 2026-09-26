@@ -1,5 +1,6 @@
 // src/extension.ts — Main entry point for DB-Scope VS Code Extension
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { BlastRadiusAnalyzer } from './blastRadius/blastRadiusAnalyzer';
 import { SqlHoverProvider } from './hoverProvider/sqlHoverProvider';
 import { SqlDiagnosticProvider } from './diagnostics/sqlDiagnosticProvider';
@@ -91,6 +92,31 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('dbscope.showHistory', async () => {
       const history = await schemaState.getHistory();
       DashboardPanel.createOrShow(context.extensionUri, { type: 'history', data: history });
+    }),
+
+    // Step 8: Export last analysis result to a JSON file
+    vscode.commands.registerCommand('dbscope.exportAnalysis', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showWarningMessage('DB-Scope: No active editor to analyze.');
+        return;
+      }
+      const sql = editor.document.getText(editor.selection) || editor.document.getText();
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Running blast radius analysis...' },
+        () => blastRadiusAnalyzer.analyze(sql)
+      );
+      const saveUri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file(`blast-radius-${Date.now()}.json`),
+        filters: { 'JSON Report': ['json'] },
+        saveLabel: 'Save Analysis Report',
+      });
+      if (!saveUri) { return; }
+      const dir = path.dirname(saveUri.fsPath);
+      const savedPath = await blastRadiusAnalyzer.exportResult(result, dir);
+      vscode.window.showInformationMessage(`DB-Scope: Analysis saved to ${path.basename(savedPath)}`, 'Open').then(sel => {
+        if (sel === 'Open') { vscode.env.openExternal(vscode.Uri.file(savedPath)); }
+      });
     })
   );
 

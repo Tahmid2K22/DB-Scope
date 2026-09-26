@@ -36,6 +36,10 @@
       {
         "command": "dbscope.showHistory",
         "title": "DB-Scope: Show Schema Evolution Timeline"
+      },
+      {
+        "command": "dbscope.exportAnalysis",
+        "title": "DB-Scope: Export Blast Radius Analysis to JSON"
       }
     ],
     "configuration": {

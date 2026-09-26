@@ -13,6 +13,11 @@ interface HoverCache {
   expiresAt: number;
 }
 
+interface SqlMatch {
+  sql: string;
+  range: vscode.Range;
+}
+
 export class SqlHoverProvider implements vscode.HoverProvider {
   private cache: HoverCache | null = null;
   private readonly CACHE_TTL_MS = 10_000; // 10 seconds
@@ -26,20 +31,21 @@ export class SqlHoverProvider implements vscode.HoverProvider {
     position: vscode.Position,
     token: vscode.CancellationToken
   ): Promise<vscode.Hover | null> {
-    const sql = this.extractSqlAtPosition(document, position);
-    if (!sql || sql.length < 6) { return null; }
+    const match = this.extractSqlAtPosition(document, position);
+    if (!match || match.sql.length < 6) { return null; }
 
     // Return cached hover if SQL hasn't changed and cache is fresh
-    if (this.cache && this.cache.sql === sql && this.cache.expiresAt > Date.now()) {
+    if (this.cache && this.cache.sql === match.sql && this.cache.expiresAt > Date.now()) {
       return this.cache.hover;
     }
 
     if (token.isCancellationRequested) { return null; }
 
-    const result = await this.analyzer.analyze(sql);
-    const hover = this.buildHover(result);
+    const result = await this.analyzer.analyze(match.sql);
+    // Step 7: pass range so VS Code highlights only the SQL token
+    const hover = this.buildHover(result, match.range);
 
-    this.cache = { sql, hover, expiresAt: Date.now() + this.CACHE_TTL_MS };
+    this.cache = { sql: match.sql, hover, expiresAt: Date.now() + this.CACHE_TTL_MS };
     return hover;
   }
 
@@ -47,49 +53,71 @@ export class SqlHoverProvider implements vscode.HoverProvider {
   // SQL Extraction
   // ──────────────────────────────────────────────
 
-  private extractSqlAtPosition(document: vscode.TextDocument, position: vscode.Position): string | null {
+  // Step 7: returns SqlMatch (sql + range) instead of bare string
+  private extractSqlAtPosition(document: vscode.TextDocument, position: vscode.Position): SqlMatch | null {
     const text = document.getText();
+    const cursorOffset = document.offsetAt(position);
 
     if (document.languageId === 'sql') {
       // For .sql files: return the entire statement containing the cursor
-      return this.extractStatementAt(text, document.offsetAt(position));
+      return this.extractStatementAt(document, text, cursorOffset);
     }
 
-    // For TypeScript/JS/Python: extract SQL from string literals near the cursor
-    const line = document.lineAt(position.line).text;
-    const sqlMatch = this.extractSqlFromString(line);
-    if (sqlMatch) { return sqlMatch; }
+    // For TypeScript/JS/Python: try current line first, then ±5 line window
+    const lineStartOffset = document.offsetAt(new vscode.Position(position.line, 0));
+    const lineText = document.lineAt(position.line).text;
+    const lineMatch = this.extractSqlFromString(lineText, lineStartOffset, document);
+    if (lineMatch) { return lineMatch; }
 
-    // Look at surrounding lines (multi-line SQL strings)
+    // Multi-line window around cursor
     const startLine = Math.max(0, position.line - 5);
     const endLine = Math.min(document.lineCount - 1, position.line + 5);
+    const windowStartOffset = document.offsetAt(new vscode.Position(startLine, 0));
     const block = document.getText(new vscode.Range(startLine, 0, endLine, 999));
-    return this.extractSqlFromString(block);
+    return this.extractSqlFromString(block, windowStartOffset, document);
   }
 
-  private extractStatementAt(text: string, offset: number): string {
-    // Split on semicolons; return the statement containing the offset
+  private extractStatementAt(document: vscode.TextDocument, text: string, offset: number): SqlMatch | null {
     let pos = 0;
     for (const stmt of text.split(';')) {
       const end = pos + stmt.length;
       if (offset >= pos && offset <= end) {
-        return stmt.trim();
+        const trimmed = stmt.trim();
+        if (!trimmed) { return null; }
+        // Range: from first non-whitespace char to end of stmt
+        const stmtStart = pos + stmt.indexOf(trimmed[0]);
+        const stmtEnd = stmtStart + trimmed.length;
+        return {
+          sql: trimmed,
+          range: new vscode.Range(document.positionAt(stmtStart), document.positionAt(stmtEnd)),
+        };
       }
       pos = end + 1;
     }
-    return text.trim();
+    const trimmed = text.trim();
+    return trimmed ? { sql: trimmed, range: new vscode.Range(document.positionAt(0), document.positionAt(text.length)) } : null;
   }
 
-  private extractSqlFromString(text: string): string | null {
-    // Match SQL keywords in string literals (backtick, single, or double quoted)
+  private extractSqlFromString(text: string, baseOffset: number, document: vscode.TextDocument): SqlMatch | null {
+    // Step 6: 4 patterns — single-quoted, double-quoted, template literal (no interpolation),
+    //         and multi-line template literal with ${...} interpolations
     const patterns = [
-      /`((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[^`]+)`/i,
+      // multi-line template literal ([\s\S]+? matches across newlines)
+      /`((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[\s\S]+?)`/i,
       /"((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[^"]+)"/i,
       /'((?:SELECT|INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE)[^']+)'/i,
     ];
     for (const pattern of patterns) {
-      const match = pattern.exec(text);
-      if (match) { return match[1]; }
+      const m = pattern.exec(text);
+      if (m) {
+        const sqlContent = m[1].replace(/\$\{[^}]*\}/g, '?'); // replace ${expr} with ? placeholder
+        const matchStart = baseOffset + m.index + 1; // +1 to skip the opening quote
+        const matchEnd = matchStart + m[1].length;
+        return {
+          sql: sqlContent,
+          range: new vscode.Range(document.positionAt(matchStart), document.positionAt(matchEnd)),
+        };
+      }
     }
     return null;
   }
@@ -98,7 +126,7 @@ export class SqlHoverProvider implements vscode.HoverProvider {
   // Hover Content Builder
   // ──────────────────────────────────────────────
 
-  private buildHover(result: BlastRadiusResult): vscode.Hover {
+  private buildHover(result: BlastRadiusResult, range?: vscode.Range): vscode.Hover {
     const md = new vscode.MarkdownString('', true);
     md.isTrusted = true;
     md.supportHtml = false;
@@ -141,9 +169,20 @@ export class SqlHoverProvider implements vscode.HoverProvider {
       md.appendMarkdown('\n');
     }
 
+    // Show rollback suggestions if present
+    if (result.rollbackSuggestions && result.rollbackSuggestions.length > 0) {
+      md.appendMarkdown(`**↩ Rollback:**\n`);
+      for (const r of result.rollbackSuggestions.slice(0, 2)) {
+        const safetyIcon = r.safetyLevel === 'safe' ? '✅' : r.safetyLevel === 'manual_review' ? '⚠' : '🔴';
+        md.appendMarkdown(`- ${safetyIcon} \`${r.sql.split('\n')[0].slice(0, 80)}\`\n`);
+      }
+      md.appendMarkdown('\n');
+    }
+
     md.appendMarkdown(`---\n_[Open Full Analysis](command:dbscope.analyzeBlastRadius)_`);
 
-    return new vscode.Hover(md);
+    // Step 7: pass range so tooltip anchors to the SQL token
+    return range ? new vscode.Hover(md, range) : new vscode.Hover(md);
   }
 
   private riskEmoji(level: RiskLevel): string {

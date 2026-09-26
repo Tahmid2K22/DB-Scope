@@ -57,6 +57,7 @@ export interface BlastRadiusResult {
   dataIntegrityRisks: DataIntegrityRisk[];
   documentationDrift: DocumentationDrift[];
   suggestions: string[];
+  rollbackSuggestions: RollbackSuggestion[];
   generatedAt: number;
 }
 
@@ -84,6 +85,12 @@ export interface DocumentationDrift {
   filePath: string;
   issue: string;
   suggestion: string;
+}
+
+export interface RollbackSuggestion {
+  description: string;
+  sql: string;
+  safetyLevel: 'safe' | 'manual_review' | 'destructive';
 }
 
 // ──────────────────────────────────────────────

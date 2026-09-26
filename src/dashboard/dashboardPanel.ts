@@ -143,6 +143,14 @@ ${body}
       `<tr><td><code>${this.esc(d.filePath)}:${d.lineNumber ?? ''}</code></td><td>${this.esc(d.tableName)}</td><td class="muted">${this.esc(d.usage)}</td></tr>`
     ).join('');
     const suggestions = r.suggestions.map(s => `<li>${this.esc(s)}</li>`).join('');
+    const rollbacks = (r.rollbackSuggestions ?? []).map(rb => {
+      const safetyColor = rb.safetyLevel === 'safe' ? 'low' : rb.safetyLevel === 'manual_review' ? 'medium' : 'critical';
+      return `<tr>
+        <td>${this.esc(rb.description)}</td>
+        <td><span class="badge ${safetyColor}">${this.esc(rb.safetyLevel)}</span></td>
+        <td><pre style="margin:0;font-size:0.8em">${this.esc(rb.sql)}</pre></td>
+      </tr>`;
+    }).join('');
 
     const body = `
 <h1>💥 Blast Radius Analysis <span class="badge ${riskColor}">${riskColor.toUpperCase()} — ${r.riskScore}/10</span></h1>
@@ -164,6 +172,9 @@ ${r.documentationDrift.length > 0 ? `<h2>📄 Documentation Drift (${r.documenta
 <ul>${r.documentationDrift.map(d => `<li><code>${this.esc(d.filePath)}</code> — ${this.esc(d.issue)}</li>`).join('')}</ul>` : ''}
 
 ${suggestions ? `<h2>💡 Suggestions</h2><ul>${suggestions}</ul>` : ''}
+
+${rollbacks ? `<h2>↩ Rollback SQL</h2>
+<table><thead><tr><th>Description</th><th>Safety</th><th>SQL</th></tr></thead><tbody>${rollbacks}</tbody></table>` : ''}
 `;
     return this.baseHtml('Blast Radius Analysis', body);
   }
