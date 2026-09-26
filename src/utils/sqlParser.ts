@@ -46,12 +46,15 @@ function extractTables(sql: string): string[] {
   const tables: string[] = [];
   for (const patterns of Object.values(TABLE_PATTERNS)) {
     for (const pattern of patterns) {
+      // Always create a fresh RegExp so lastIndex starts at 0 for every call
       const regex = new RegExp(pattern.source, pattern.flags);
       let match: RegExpExecArray | null;
       while ((match = regex.exec(sql)) !== null) {
         const table = match[1].replace(/[`"]/g, '');
-        if (!SQL_KEYWORDS.has(table.toUpperCase())) {
-          tables.push(table);
+        // Skip dotted names (schema.table) — keep only the table part
+        const tableName = table.includes('.') ? table.split('.').pop()! : table;
+        if (!SQL_KEYWORDS.has(tableName.toUpperCase())) {
+          tables.push(tableName);
         }
       }
     }

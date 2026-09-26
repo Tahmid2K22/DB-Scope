@@ -63,25 +63,26 @@ export class BlastRadiusAnalyzer {
     const nonBreaking: string[] = [];
     const cascade: string[] = [];
 
-    const sql = parsed.rawSql.toUpperCase();
+    // Use original SQL with /i flag — no need to uppercase
+    const sql = parsed.rawSql;
 
     if (parsed.operation === 'DROP') {
       breaking.push(`DROP TABLE removes all data and invalidates all foreign key references`);
     }
     if (parsed.operation === 'ALTER') {
-      if (/DROP\s+COLUMN/.test(sql)) {
+      if (/DROP\s+COLUMN/i.test(sql)) {
         breaking.push(`DROP COLUMN destroys column data permanently`);
       }
-      if (/RENAME\s+(?:COLUMN|TABLE)/.test(sql)) {
+      if (/RENAME\s+(?:COLUMN|TABLE)/i.test(sql)) {
         breaking.push(`RENAME will break all existing queries and ORM mappings`);
       }
-      if (/MODIFY|CHANGE/.test(sql)) {
+      if (/\bMODIFY\b|\bCHANGE\b/i.test(sql)) {
         breaking.push(`Column type change may cause data truncation or conversion errors`);
       }
-      if (/ADD\s+COLUMN/.test(sql)) {
+      if (/ADD\s+COLUMN/i.test(sql)) {
         nonBreaking.push(`ADD COLUMN is backward-compatible if nullable or has a default`);
       }
-      if (/ADD.*NOT NULL/.test(sql) && !/DEFAULT/.test(sql)) {
+      if (/ADD.*NOT\s+NULL/i.test(sql) && !/DEFAULT/i.test(sql)) {
         breaking.push(`NOT NULL constraint without DEFAULT will fail on existing rows`);
       }
     }
@@ -126,27 +127,23 @@ export class BlastRadiusAnalyzer {
         const doc = await vscode.workspace.openTextDocument(file);
         const text = doc.getText();
         for (const tableName of tables) {
-          // Match table names in SQL strings, ORM models, query builders
-          const patterns = [
-            new RegExp(`['"\`].*\\b${tableName}\\b.*['"\`]`, 'gi'),
-            new RegExp(`\\b${tableName}\\b`, 'gi'),
-          ];
-          for (const pattern of patterns) {
-            let match: RegExpExecArray | null;
-            while ((match = pattern.exec(text)) !== null) {
-              const line = doc.positionAt(match.index).line;
-              const lineText = doc.lineAt(line).text.trim();
-              // Filter out comment lines and import/require lines
-              if (lineText.startsWith('//') || lineText.startsWith('#') || lineText.startsWith('import')) { continue; }
-              deps.push({
-                filePath: vscode.workspace.asRelativePath(file),
-                lineNumber: line + 1,
-                tableName,
-                usage: lineText.slice(0, 100),
-                severity: this.classifyDepSeverity(lineText),
-              });
-              break; // one match per table per file
-            }
+          // Single pattern with word boundaries — avoids duplicate matches per file.
+          // A new RegExp per table resets lastIndex automatically.
+          const pattern = new RegExp(`\\b${tableName}\\b`, 'gi');
+          let match: RegExpExecArray | null;
+          while ((match = pattern.exec(text)) !== null) {
+            const line = doc.positionAt(match.index).line;
+            const lineText = doc.lineAt(line).text.trim();
+            // Filter out comment lines and import/require lines
+            if (lineText.startsWith('//') || lineText.startsWith('#') || lineText.startsWith('import')) { continue; }
+            deps.push({
+              filePath: vscode.workspace.asRelativePath(file),
+              lineNumber: line + 1,
+              tableName,
+              usage: lineText.slice(0, 100),
+              severity: this.classifyDepSeverity(lineText),
+            });
+            break; // one match per table per file — stop after first valid hit
           }
         }
       } catch {
@@ -171,33 +168,34 @@ export class BlastRadiusAnalyzer {
 
   private async assessDataIntegrityRisks(parsed: ReturnType<typeof parseSql>): Promise<DataIntegrityRisk[]> {
     const risks: DataIntegrityRisk[] = [];
-    const sql = parsed.rawSql.toUpperCase();
+    // Use original SQL with /i flag — no uppercase needed
+    const sql = parsed.rawSql;
 
-    if (parsed.operation === 'DELETE' && !/WHERE/.test(sql)) {
+    if (parsed.operation === 'DELETE' && !/WHERE/i.test(sql)) {
       risks.push({
         description: 'DELETE without WHERE clause — will remove ALL rows in the table',
         severity: 'critical',
       });
     }
-    if (parsed.operation === 'UPDATE' && !/WHERE/.test(sql)) {
+    if (parsed.operation === 'UPDATE' && !/WHERE/i.test(sql)) {
       risks.push({
         description: 'UPDATE without WHERE clause — will update ALL rows in the table',
         severity: 'critical',
       });
     }
-    if (/ALTER.*DROP\s+COLUMN/.test(sql)) {
+    if (/ALTER.*DROP\s+COLUMN/i.test(sql)) {
       risks.push({
         description: 'DROP COLUMN is irreversible — ensure a backup exists before proceeding',
         severity: 'high',
       });
     }
-    if (/NOT\s+NULL/.test(sql) && !/DEFAULT/.test(sql) && !/ADD\s+COLUMN/.test(sql)) {
+    if (/NOT\s+NULL/i.test(sql) && !/DEFAULT/i.test(sql) && !/ADD\s+COLUMN/i.test(sql)) {
       risks.push({
         description: 'Adding NOT NULL constraint without DEFAULT will fail if any existing row has NULL',
         severity: 'high',
       });
     }
-    if (/CASCADE/.test(sql)) {
+    if (/\bCASCADE\b/i.test(sql)) {
       risks.push({
         description: 'CASCADE operation will propagate to all child tables — audit foreign key references',
         severity: 'medium',
@@ -219,22 +217,24 @@ export class BlastRadiusAnalyzer {
 
     for (const file of docFiles) {
       try {
+        const relPath = vscode.workspace.asRelativePath(file);
+        const isDocFile = /readme|api|schema/i.test(relPath);
+        if (!isDocFile) { continue; } // skip early — no need to open non-doc files
+
         const doc = await vscode.workspace.openTextDocument(file);
-        const text = doc.getText();
+        const text = doc.getText().toLowerCase();
+
         for (const tableName of tables) {
-          if (!text.toLowerCase().includes(tableName.toLowerCase())) {
-            const relPath = vscode.workspace.asRelativePath(file);
-            if (relPath.toLowerCase().includes('readme') || relPath.toLowerCase().includes('api') || relPath.toLowerCase().includes('schema')) {
-              drifts.push({
-                filePath: relPath,
-                issue: `Table "${tableName}" is not documented in ${path.basename(file.fsPath)}`,
-                suggestion: `Add documentation for the ${tableName} table to ${relPath}`,
-              });
-            }
+          if (!text.includes(tableName.toLowerCase())) {
+            drifts.push({
+              filePath: relPath,
+              issue: `Table "${tableName}" is not documented in ${path.basename(file.fsPath)}`,
+              suggestion: `Add documentation for the ${tableName} table to ${relPath}`,
+            });
           }
         }
       } catch {
-        // skip
+        // skip unreadable files
       }
     }
 
@@ -251,14 +251,20 @@ export class BlastRadiusAnalyzer {
     data: DataIntegrityRisk[],
     docs: DocumentationDrift[]
   ): number {
-    let score = 1;
+    // Base: 0. Each dimension contributes up to a capped amount. Max total = 10.
+    let score = 0;
+    // Dimension 1 — Schema (max 5): breaking changes worth 2 each (cap 4), cascades 0.5 each (cap 1)
     score += Math.min(schema.breakingChanges.length * 2, 4);
-    score += Math.min(schema.cascadeEffects.length * 0.5, 2);
-    score += data.filter(r => r.severity === 'critical').length * 2;
-    score += data.filter(r => r.severity === 'high').length * 1;
-    score += Math.min(deps.filter(d => d.severity === 'critical').length * 0.5, 1.5);
-    score += Math.min(docs.length * 0.2, 1);
-    return Math.min(Math.round(score), 10);
+    score += Math.min(schema.cascadeEffects.length * 0.5, 1);
+    // Dimension 2 — App deps (max 2): critical usages found in source files
+    score += Math.min(deps.filter(d => d.severity === 'critical').length, 2);
+    // Dimension 3 — Data integrity (max 3): critical=2pts, high=1pt
+    score += Math.min(data.filter(r => r.severity === 'critical').length * 2, 2);
+    score += Math.min(data.filter(r => r.severity === 'high').length, 1);
+    // Dimension 4 — Docs drift (max 1): 0.25 per undocumented table
+    score += Math.min(docs.length * 0.25, 1);
+    // Always at least 1 for any analyzed SQL
+    return Math.min(Math.max(Math.round(score), 1), 10);
   }
 
   private scoreToLevel(score: number): RiskLevel {

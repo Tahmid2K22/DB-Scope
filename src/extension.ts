@@ -25,7 +25,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const mergeAnalyzer = new MergeAnalyzer(schemaState);
 
   // Register SQL hover provider for .sql files and inline SQL strings
-  const hoverProvider = new SqlHoverProvider(blastRadiusAnalyzer, schemaState);
+  const hoverProvider = new SqlHoverProvider(blastRadiusAnalyzer);
   context.subscriptions.push(
     vscode.languages.registerHoverProvider(
       [{ language: 'sql' }, { language: 'typescript' }, { language: 'javascript' }, { language: 'python' }],

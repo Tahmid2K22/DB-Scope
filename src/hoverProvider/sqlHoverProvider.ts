@@ -4,9 +4,7 @@
 
 import * as vscode from 'vscode';
 import { BlastRadiusAnalyzer } from '../blastRadius/blastRadiusAnalyzer';
-import { SchemaStateMap } from '../core/schemaStateMap';
-import { parseSql } from '../utils/sqlParser';
-import { RiskLevel } from '../core/types';
+import { BlastRadiusResult, RiskLevel } from '../core/types';
 
 // Cache to avoid re-analyzing the same SQL on every hover
 interface HoverCache {
@@ -20,8 +18,7 @@ export class SqlHoverProvider implements vscode.HoverProvider {
   private readonly CACHE_TTL_MS = 10_000; // 10 seconds
 
   constructor(
-    private readonly analyzer: BlastRadiusAnalyzer,
-    private readonly schemaState: SchemaStateMap
+    private readonly analyzer: BlastRadiusAnalyzer
   ) {}
 
   async provideHover(
@@ -101,7 +98,7 @@ export class SqlHoverProvider implements vscode.HoverProvider {
   // Hover Content Builder
   // ──────────────────────────────────────────────
 
-  private buildHover(result: ReturnType<typeof Object.assign> & { riskScore: number; riskLevel: RiskLevel; affectedTables: string[]; schemaImpact: { breakingChanges: string[]; cascadeEffects: string[] }; dataIntegrityRisks: { description: string; severity: string }[]; suggestions: string[] }): vscode.Hover {
+  private buildHover(result: BlastRadiusResult): vscode.Hover {
     const md = new vscode.MarkdownString('', true);
     md.isTrusted = true;
     md.supportHtml = false;
