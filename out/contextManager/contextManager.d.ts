@@ -7,22 +7,21 @@ export declare class ContextManager {
     private isFetching;
     private debounceTimer;
     private readonly DEBOUNCE_MS;
-    constructor(schemaState: SchemaStateMap, extensionContext: vscode.ExtensionContext);
+    private readonly CONNECT_TIMEOUT_MS;
+    private readonly EXTRACT_TIMEOUT_MS;
+    private statusBarItem;
+    constructor(schemaState: SchemaStateMap, extensionContext: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem);
     /**
      * Scans the entire workspace for schema definitions (migrations, ORM models,
-     * SQL files, Prisma schemas) and builds/updates the SchemaStateMap.
+     * SQL files, Prisma schemas) and optionally merges with a live DB schema.
      */
     fetchFromCodebase(): Promise<void>;
+    private setStatus;
+    private fetchLiveSchema;
+    private withTimeout;
     private scanCodebase;
-    private parseSqlFile;
-    private parseColumnDefinitions;
-    private splitColumnDefs;
-    private extractReferences;
-    private parsePrismaSchema;
-    private parseModelFile;
+    private readSafe;
     private registerListeners;
     private debounce;
-    private statusBarItem;
-    private updateStatusBar;
 }
 //# sourceMappingURL=contextManager.d.ts.map

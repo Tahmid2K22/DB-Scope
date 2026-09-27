@@ -7,14 +7,19 @@ export declare class SqlDiagnosticProvider {
     private readonly logger;
     private debounceTimer;
     private readonly DEBOUNCE_MS;
-    private interruptShown;
+    private readonly sessionAlerts;
     constructor(schemaState: SchemaStateMap, contextManager: ContextManager);
     register(collection: vscode.DiagnosticCollection, context: vscode.ExtensionContext): void;
+    /**
+     * Gate for "execute" flow: shows modal warnings before the user runs destructive SQL.
+     * Called by extension.ts at the top of dbscope.analyzeBlastRadius command.
+     */
+    promptDestructiveGate(document: vscode.TextDocument): Promise<void>;
     private analyze;
-    private runRules;
+    private processModals;
+    private showModalWarning;
     private toVsDiagnostic;
     private toVsSeverity;
-    private showInterruptWarning;
     private debounce;
 }
 //# sourceMappingURL=sqlDiagnosticProvider.d.ts.map

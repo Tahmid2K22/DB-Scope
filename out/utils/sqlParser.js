@@ -1,7 +1,9 @@
 "use strict";
-// src/utils/sqlParser.ts — Lightweight SQL parsing utilities
-// Extracts table references, operation type, and affected columns from raw SQL
+// src/utils/sqlParser.ts — SQL parsing utilities
+// parseSqlAI uses IBM watsonx.ai Granite to understand ANY SQL dialect.
+// parseSql (regex fallback) is kept as the offline/error fallback.
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.parseSqlAI = parseSqlAI;
 exports.parseSql = parseSql;
 const TABLE_PATTERNS = {
     FROM: [/\bFROM\s+([`"]?[\w.]+[`"]?)/gi],
@@ -11,6 +13,43 @@ const TABLE_PATTERNS = {
     TABLE: [/\bTABLE\s+(?:IF\s+EXISTS\s+)?([`"]?[\w.]+[`"]?)/gi],
 };
 const DESTRUCTIVE_OPS = ['DELETE', 'DROP', 'TRUNCATE', 'ALTER'];
+/**
+ * AI-powered SQL parser — uses Granite to handle CTEs, MERGE, stored procedures,
+ * and any dialect. Falls back to the regex parser if the AI call fails.
+ */
+async function parseSqlAI(sql, watsonxClient) {
+    if (!watsonxClient) {
+        return parseSql(sql);
+    }
+    try {
+        const system = `You are a SQL parser.
+Extract the primary SQL operation and all referenced table names from the given SQL statement.
+Handle CTEs, subqueries, MERGE statements, and any SQL dialect correctly.
+Return ONLY valid JSON with no extra text:
+{ "operation": "DELETE", "tables": ["orders","users"], "columns": [], "isDestructive": true }
+Valid operations: SELECT INSERT UPDATE DELETE ALTER DROP CREATE TRUNCATE UNKNOWN
+isDestructive is true for DELETE, DROP, TRUNCATE, ALTER.`;
+        const user = `SQL:\n${sql}`;
+        const raw = await watsonxClient.ask(system, user, 256);
+        // Extract JSON from the response (Granite may wrap it in markdown fences)
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            throw new Error('No JSON in response');
+        }
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+            operation: parsed.operation ?? 'UNKNOWN',
+            tables: [...new Set(parsed.tables ?? [])],
+            columns: [...new Set(parsed.columns ?? [])],
+            isDestructive: parsed.isDestructive ?? false,
+            rawSql: sql,
+        };
+    }
+    catch {
+        // AI unavailable or parse error — fall back to regex parser silently
+        return parseSql(sql);
+    }
+}
 function parseSql(sql) {
     const normalized = sql.trim().replace(/\s+/g, ' ');
     const operation = detectOperation(normalized);

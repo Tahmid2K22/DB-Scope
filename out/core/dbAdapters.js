@@ -92,6 +92,33 @@ class PostgresAdapter {
             this.client = null;
         }
     }
+    async extractTablesSchema(tableNames) {
+        if (tableNames.length === 0) {
+            return {};
+        }
+        const { Client } = await Promise.resolve().then(() => __importStar(require('pg')));
+        const client = new Client({ connectionString: this.connectionString });
+        await client.connect();
+        try {
+            const tables = {};
+            // Fetch row counts
+            const countRes = await client.query(`SELECT relname, reltuples::bigint AS row_count FROM pg_class WHERE relname = ANY($1)`, [tableNames]);
+            const rowCounts = new Map(countRes.rows.map(r => [r.relname, Number(r.row_count)]));
+            for (const tableName of tableNames) {
+                const columns = await this.fetchColumns(tableName, client);
+                tables[tableName] = {
+                    name: tableName,
+                    columns,
+                    indexes: [],
+                    rowCount: rowCounts.get(tableName)
+                };
+            }
+            return tables;
+        }
+        finally {
+            await client.end();
+        }
+    }
     async fetchTables() {
         if (!this.client) {
             throw new Error('Not connected');
@@ -108,24 +135,25 @@ class PostgresAdapter {
         }
         return tables;
     }
-    async fetchColumns(tableName) {
-        if (!this.client) {
+    async fetchColumns(tableName, client) {
+        const c = client ?? this.client;
+        if (!c) {
             throw new Error('Not connected');
         }
         const columns = {};
-        const colRes = await this.client.query(`SELECT column_name, data_type, is_nullable, column_default
+        const colRes = await c.query(`SELECT column_name, data_type, is_nullable, column_default
        FROM information_schema.columns
        WHERE table_schema = 'public' AND table_name = $1
        ORDER BY ordinal_position`, [tableName]);
         // Get primary key columns
-        const pkRes = await this.client.query(`SELECT kcu.column_name
+        const pkRes = await c.query(`SELECT kcu.column_name
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
          ON tc.constraint_name = kcu.constraint_name
        WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'`, [tableName]);
         const pkCols = new Set(pkRes.rows.map(r => r.column_name));
         // Get foreign key columns
-        const fkRes = await this.client.query(`SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
+        const fkRes = await c.query(`SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
        FROM information_schema.table_constraints tc
        JOIN information_schema.key_column_usage kcu
          ON tc.constraint_name = kcu.constraint_name
@@ -205,6 +233,41 @@ class MySqlAdapter {
             await conn.end();
         }
     }
+    async extractTablesSchema(tableNames) {
+        if (tableNames.length === 0) {
+            return {};
+        }
+        const mysql = await Promise.resolve().then(() => __importStar(require('mysql2/promise')));
+        const conn = await mysql.createConnection(this.connectionString);
+        try {
+            const tables = {};
+            for (const tableName of tableNames) {
+                // Fetch row count
+                const [tableStats] = await conn.execute(`SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`, [tableName]);
+                const rowCount = tableStats.length > 0 ? Number(tableStats[0]['TABLE_ROWS']) : undefined;
+                // Fetch columns
+                const [colRows] = await conn.execute(`SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY
+           FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+           ORDER BY ORDINAL_POSITION`, [tableName]);
+                const columns = {};
+                for (const col of colRows) {
+                    columns[col['COLUMN_NAME']] = {
+                        name: col['COLUMN_NAME'],
+                        type: col['DATA_TYPE'],
+                        nullable: col['IS_NULLABLE'] === 'YES',
+                        isPrimaryKey: col['COLUMN_KEY'] === 'PRI',
+                        isForeignKey: col['COLUMN_KEY'] === 'MUL',
+                        defaultValue: col['COLUMN_DEFAULT'] ?? undefined,
+                    };
+                }
+                tables[tableName] = { name: tableName, columns, indexes: [], rowCount };
+            }
+            return tables;
+        }
+        finally {
+            await conn.end();
+        }
+    }
     async disconnect() { }
 }
 // ──────────────────────────────────────────────────────────────────────────────
@@ -229,6 +292,10 @@ class OracleAdapter {
             tables: {},
             extractedAt: Date.now(),
         };
+    }
+    async extractTablesSchema(tableNames) {
+        this.logger.warn('OracleAdapter: extractTablesSchema stub');
+        return {};
     }
     async disconnect() { }
 }

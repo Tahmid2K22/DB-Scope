@@ -13,10 +13,19 @@ export interface IndexDefinition {
     columns: string[];
     isUnique: boolean;
 }
+export interface TableConstraint {
+    name?: string;
+    type: 'primary_key' | 'foreign_key' | 'unique' | 'check';
+    columns: string[];
+    referencesTable?: string;
+    referenceColumns?: string[];
+    raw: string;
+}
 export interface TableDefinition {
     name: string;
     columns: Record<string, ColumnDefinition>;
     indexes: IndexDefinition[];
+    constraints?: TableConstraint[];
     rowCount?: number;
 }
 export interface DatabaseSchema {
@@ -24,6 +33,7 @@ export interface DatabaseSchema {
     databaseName: string;
     tables: Record<string, TableDefinition>;
     extractedAt: number;
+    source?: 'live' | 'codebase' | 'merged';
 }
 export interface SchemaSnapshot {
     timestamp: number;
@@ -31,6 +41,24 @@ export interface SchemaSnapshot {
     changeCount: number;
 }
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+/**
+ * How confident Granite was in one analysis dimension (0–100).
+ * confidenceReason explains in plain English what context was missing.
+ */
+export interface DimensionConfidence {
+    confidenceScore: number;
+    confidenceReason: string;
+}
+/**
+ * Per-dimension + overall AI confidence for a single blast radius analysis.
+ */
+export interface AnalysisConfidence {
+    overall: DimensionConfidence;
+    schemaImpact: DimensionConfidence;
+    appDependencies: DimensionConfidence;
+    dataIntegrityRisks: DimensionConfidence;
+    documentationDrift: DimensionConfidence;
+}
 export interface BlastRadiusResult {
     sql: string;
     riskScore: number;
@@ -42,6 +70,8 @@ export interface BlastRadiusResult {
     documentationDrift: DocumentationDrift[];
     suggestions: string[];
     rollbackSuggestions: RollbackSuggestion[];
+    riskExplanation: string;
+    confidence: AnalysisConfidence;
     generatedAt: number;
 }
 export interface SchemaImpact {
@@ -79,6 +109,7 @@ export interface SqlDiagnostic {
     endOffset: number;
     suggestion?: string;
     riskScore?: number;
+    code?: string;
 }
 export interface DuplicateGroup {
     semanticMeaning: string;
@@ -90,6 +121,38 @@ export interface DuplicateColumn {
     column: string;
     type: string;
     reason: string;
+}
+export interface DuplicateTableGroup {
+    semanticMeaning: string;
+    tables: {
+        name: string;
+        columnCount: number;
+        similarity: number;
+    }[];
+    similarity: number;
+    suggestion: string;
+}
+export type DuplicateSeverity = 'critical' | 'high' | 'medium' | 'low';
+export interface MigrationScript {
+    id: string;
+    title: string;
+    upSql: string;
+    downSql: string;
+    tables: string[];
+    riskLevel: RiskLevel;
+}
+export interface ParsedAlterTable {
+    operation: 'ADD_COLUMN' | 'DROP_COLUMN' | 'RENAME_COLUMN' | 'MODIFY_COLUMN' | 'RENAME_TABLE' | 'ADD_CONSTRAINT' | 'DROP_CONSTRAINT' | 'UNKNOWN';
+    table: string;
+    column?: string;
+    newName?: string;
+    definition?: string;
+    newType?: string;
+    nullable?: boolean;
+    defaultValue?: string;
+    constraintName?: string;
+    dialect: 'postgresql' | 'mysql' | 'oracle' | 'ansi';
+    rawSql: string;
 }
 export interface MergeConflict {
     table: string;

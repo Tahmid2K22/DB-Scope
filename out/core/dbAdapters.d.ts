@@ -1,7 +1,8 @@
-import { DatabaseSchema } from './types';
+import { DatabaseSchema, TableDefinition } from './types';
 export interface DbAdapter {
     testConnection(): Promise<boolean>;
     extractSchema(databaseName: string): Promise<DatabaseSchema>;
+    extractTablesSchema(tableNames: string[]): Promise<Record<string, TableDefinition>>;
     disconnect(): Promise<void>;
 }
 export type DbConfig = {
