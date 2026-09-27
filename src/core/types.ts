@@ -47,6 +47,26 @@ export interface SchemaSnapshot {
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 
+/**
+ * How confident Granite was in one analysis dimension (0–100).
+ * confidenceReason explains in plain English what context was missing.
+ */
+export interface DimensionConfidence {
+  confidenceScore: number;   // 0 (no context) → 100 (full context)
+  confidenceReason: string;  // e.g. "Row count for orders unknown — run Fetch Context"
+}
+
+/**
+ * Per-dimension + overall AI confidence for a single blast radius analysis.
+ */
+export interface AnalysisConfidence {
+  overall: DimensionConfidence;
+  schemaImpact: DimensionConfidence;
+  appDependencies: DimensionConfidence;
+  dataIntegrityRisks: DimensionConfidence;
+  documentationDrift: DimensionConfidence;
+}
+
 export interface BlastRadiusResult {
   sql: string;
   riskScore: number;          // 1-10
@@ -58,6 +78,8 @@ export interface BlastRadiusResult {
   documentationDrift: DocumentationDrift[];
   suggestions: string[];
   rollbackSuggestions: RollbackSuggestion[];
+  riskExplanation: string;        // Granite's natural-language explanation of the score
+  confidence: AnalysisConfidence; // per-dimension + overall AI confidence
   generatedAt: number;
 }
 

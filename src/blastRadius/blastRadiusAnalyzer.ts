@@ -1,7 +1,7 @@
 // src/blastRadius/blastRadiusAnalyzer.ts
-// Member 1 — 4-Dimension Blast Radius Analyzer
-// Predicts the full impact of any migration across: schema, app dependencies,
-// data integrity, and documentation drift.
+// Member 1 — AI-Powered Blast Radius Analyzer
+// Every analysis decision is made by IBM watsonx.ai Granite (ibm/granite-3-3-8b-instruct).
+// Deterministic regex has been removed — AI understands context, dialect, and nuance.
 
 import * as vscode from 'vscode';
 import * as path from 'path';
@@ -14,15 +14,32 @@ import {
   SchemaImpact,
   RiskLevel,
   RollbackSuggestion,
+  DimensionConfidence,
+  AnalysisConfidence,
 } from '../core/types';
 import { SchemaStateMap } from '../core/schemaStateMap';
-import { parseSql } from '../utils/sqlParser';
+import { parseSqlAI } from '../utils/sqlParser';
 import { Logger } from '../utils/logger';
+import { WatsonxClient, getWatsonxClient } from '../ai/watsonxClient';
+import { createAdapter, DbConfig } from '../core/dbAdapters';
+import { TableDefinition } from '../core/types';
+
+// ── Fallback confidence when AI is unavailable ─────────────────────────────
+const UNAVAILABLE: DimensionConfidence = {
+  confidenceScore: 0,
+  confidenceReason: 'AI unavailable — configure watsonx.ai credentials in DB-Scope settings',
+};
 
 export class BlastRadiusAnalyzer {
   private readonly logger = Logger.getInstance();
+  private readonly ai: WatsonxClient;
 
-  constructor(private readonly schemaState: SchemaStateMap) {}
+  constructor(
+    private readonly schemaState: SchemaStateMap,
+    ai?: WatsonxClient,
+  ) {
+    this.ai = ai ?? getWatsonxClient();
+  }
 
   // ──────────────────────────────────────────────
   // Main entry point
@@ -30,234 +47,319 @@ export class BlastRadiusAnalyzer {
 
   async analyze(sql: string): Promise<BlastRadiusResult> {
     this.logger.info(`BlastRadius: analyzing SQL (${sql.length} chars)`);
-    const parsed = parseSql(sql);
 
-    const [schemaImpact, appDeps, dataRisks, docDrift] = await Promise.all([
-      this.analyzeSchemaImpact(parsed),
+    // Step 2: AI-powered parser — handles CTEs, MERGE, stored procs
+    const parsed = await parseSqlAI(sql, this.ai);
+
+    // Fetch live schema if connection string is configured
+    const config = vscode.workspace.getConfiguration('dbscope');
+    const connStr = config.get<string>('connectionString');
+    const dbType = config.get<string>('dbType') as DbConfig['dbType'] ?? 'postgresql';
+
+    let liveTables: Record<string, TableDefinition> = {};
+    if (connStr && parsed.tables.length > 0) {
+      try {
+        const adapter = createAdapter({ dbType, connectionString: connStr });
+        if (adapter) {
+          liveTables = await adapter.extractTablesSchema(parsed.tables);
+        }
+      } catch (err) {
+        this.logger.warn(`Failed to fetch live schema: ${err}`);
+      }
+    }
+
+    const activeSchema = {
+      getTable: (name: string) => liveTables[name] || this.schemaState.getTable(name)
+    };
+
+    // Dimensions 1-4 run in parallel (each makes one Granite call)
+    const [schemaImpact, appDepsResult, dataRisksResult, docDrift] = await Promise.all([
+      this.analyzeSchemaImpact(parsed, activeSchema),
       this.findAppDependencies(parsed.tables),
-      this.assessDataIntegrityRisks(parsed),
+      this.assessDataIntegrityRisks(parsed, activeSchema),
       this.detectDocumentationDrift(parsed.tables),
     ]);
 
-    const riskScore = this.calculateRiskScore(schemaImpact, appDeps, dataRisks, docDrift, parsed.tables);
-    const riskLevel = this.scoreToLevel(riskScore);
+    // Step 5: AI risk score — single call returns score + explanation + all 5 confidence scores
+    const scoreResult = await this.calculateRiskScore(
+      schemaImpact.impact,
+      appDepsResult.deps,
+      dataRisksResult.risks,
+      docDrift,
+      parsed.tables,
+      {
+        filesScanned:    appDepsResult.filesScanned,
+        totalFilesEst:   appDepsResult.totalFilesEst,
+        schemaLoaded:    parsed.tables.some(t => !!activeSchema.getTable(t)),
+        rowCountsKnown:  parsed.tables.some(t => activeSchema.getTable(t)?.rowCount !== undefined),
+        docFilesFound:   docDrift.length === 0, // if drifts found, doc files were scanned
+      },
+      activeSchema
+    );
+
+    // Step 6: AI-written rollback SQL
+    const rollbackSuggestions = await this.buildRollbackSuggestions(parsed, activeSchema);
+
+    const riskLevel = this.scoreToLevel(scoreResult.score);
 
     return {
       sql,
-      riskScore,
+      riskScore:          scoreResult.score,
       riskLevel,
-      affectedTables: parsed.tables,
-      schemaImpact,
-      appDependencies: appDeps,
-      dataIntegrityRisks: dataRisks,
+      affectedTables:     parsed.tables,
+      schemaImpact:       schemaImpact.impact,
+      appDependencies:    appDepsResult.deps,
+      dataIntegrityRisks: dataRisksResult.risks,
       documentationDrift: docDrift,
-      suggestions: this.buildSuggestions(schemaImpact, appDeps, dataRisks, riskScore),
-      rollbackSuggestions: this.buildRollbackSuggestions(parsed),
-      generatedAt: Date.now(),
+      suggestions:        scoreResult.suggestions,
+      rollbackSuggestions,
+      riskExplanation:    scoreResult.explanation,
+      confidence:         scoreResult.confidence,
+      generatedAt:        Date.now(),
     };
   }
 
   // ──────────────────────────────────────────────
-  // Dimension 1: Schema Impact
+  // Dimension 1: AI Schema Impact
   // ──────────────────────────────────────────────
 
-  private async analyzeSchemaImpact(parsed: ReturnType<typeof parseSql>): Promise<SchemaImpact> {
-    const breaking: string[] = [];
-    const nonBreaking: string[] = [];
-    const cascade: string[] = [];
+  private async analyzeSchemaImpact(
+    parsed: Awaited<ReturnType<typeof parseSqlAI>>,
+    activeSchema: { getTable(name: string): TableDefinition | null }
+  ): Promise<{ impact: SchemaImpact; confidence: DimensionConfidence }> {
+    const schemaContext = this.buildSchemaContext(parsed.tables, activeSchema);
+    const schemaAvailable = schemaContext !== 'Schema: not loaded';
 
-    // Use original SQL with /i flag — no need to uppercase
-    const sql = parsed.rawSql;
+    const system = `You are a database migration safety expert.
+Given a SQL statement and the current table schema, identify all schema-level impacts.
+Consider breaking changes (things that will break existing queries, ORMs, or APIs),
+non-breaking changes (backward-compatible additions), and cascade effects through foreign keys.
+Return ONLY valid JSON with no extra text or markdown fences:
+{
+  "breakingChanges": ["<human-readable description>"],
+  "nonBreakingChanges": ["<human-readable description>"],
+  "cascadeEffects": ["<human-readable description>"],
+  "confidenceScore": 85,
+  "confidenceReason": "<what context was available or missing>"
+}`;
 
-    if (parsed.operation === 'DROP') {
-      breaking.push(`DROP TABLE removes all data and invalidates all foreign key references`);
-    }
-    if (parsed.operation === 'ALTER') {
-      if (/DROP\s+COLUMN/i.test(sql)) {
-        breaking.push(`DROP COLUMN destroys column data permanently`);
-      }
-      if (/RENAME\s+(?:COLUMN|TABLE)/i.test(sql)) {
-        breaking.push(`RENAME will break all existing queries and ORM mappings`);
-      }
-      if (/\bMODIFY\b|\bCHANGE\b/i.test(sql)) {
-        breaking.push(`Column type change may cause data truncation or conversion errors`);
-      }
-      if (/ADD\s+COLUMN/i.test(sql)) {
-        nonBreaking.push(`ADD COLUMN is backward-compatible if nullable or has a default`);
-      }
-      if (/ADD.*NOT\s+NULL/i.test(sql) && !/DEFAULT/i.test(sql)) {
-        breaking.push(`NOT NULL constraint without DEFAULT will fail on existing rows`);
-      }
-    }
-    if (parsed.operation === 'DELETE') {
-      breaking.push(`DELETE may cascade to child tables via foreign key constraints`);
-    }
-    if (parsed.operation === 'TRUNCATE') {
-      breaking.push(`TRUNCATE removes ALL rows — irreversible without a backup`);
-    }
+    const user = `SQL: ${parsed.rawSql}
+${schemaContext}
+Schema available: ${schemaAvailable}`;
 
-    // Check cascade effects from schema
-    for (const tableName of parsed.tables) {
-      const table = this.schemaState.getTable(tableName);
-      if (table) {
-        for (const col of Object.values(table.columns)) {
-          if (col.isForeignKey && col.referencesTable) {
-            cascade.push(`Foreign key ${tableName}.${col.name} → ${col.referencesTable}.${col.referencesColumn}`);
-          }
-        }
-      }
+    try {
+      const raw   = await this.ai.ask(system, user, 512);
+      const json  = this.extractJson(raw);
+      const data  = JSON.parse(json) as {
+        breakingChanges:    string[];
+        nonBreakingChanges: string[];
+        cascadeEffects:     string[];
+        confidenceScore:    number;
+        confidenceReason:   string;
+      };
+      return {
+        impact: {
+          breakingChanges:    data.breakingChanges    ?? [],
+          nonBreakingChanges: data.nonBreakingChanges ?? [],
+          cascadeEffects:     data.cascadeEffects     ?? [],
+        },
+        confidence: {
+          confidenceScore:  data.confidenceScore  ?? 50,
+          confidenceReason: data.confidenceReason ?? '',
+        },
+      };
+    } catch (err) {
+      this.logger.warn(`analyzeSchemaImpact AI error: ${err}`);
+      return {
+        impact:     { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
+        confidence: UNAVAILABLE,
+      };
     }
-
-    return { breakingChanges: breaking, nonBreakingChanges: nonBreaking, cascadeEffects: cascade };
   }
 
   // ──────────────────────────────────────────────
-  // Dimension 2: App Dependencies
+  // Dimension 2: AI App Dependency Classification
   // ──────────────────────────────────────────────
 
-  private async findAppDependencies(tables: string[]): Promise<AppDependency[]> {
-    if (tables.length === 0) { return []; }
+  private async findAppDependencies(
+    tables: string[]
+  ): Promise<{ deps: AppDependency[]; filesScanned: number; totalFilesEst: number }> {
+    if (tables.length === 0) { return { deps: [], filesScanned: 0, totalFilesEst: 0 }; }
 
-    const deps: AppDependency[] = [];
     const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) { return []; }
+    if (!workspaceFolders) { return { deps: [], filesScanned: 0, totalFilesEst: 0 }; }
 
+    // Phase 1 (deterministic I/O): find candidate files containing any table name or model class
     const sourceGlob = '**/*.{ts,js,py,java,rb,go,cs}';
     const files = await vscode.workspace.findFiles(sourceGlob, '**/node_modules/**', 200);
 
+    const candidates: { filePath: string; lineNumber: number; tableName: string; lineText: string }[] = [];
+
     for (const file of files) {
       try {
-        const doc = await vscode.workspace.openTextDocument(file);
+        const doc  = await vscode.workspace.openTextDocument(file);
         const text = doc.getText();
         for (const tableName of tables) {
-          // Build search terms: literal table name + ORM model class name (PascalCase singular)
           const searchTerms = [tableName, this.deriveModelName(tableName)];
-          let foundInFile = false;
-
           for (const term of searchTerms) {
-            if (foundInFile) { break; }
             const pattern = new RegExp(`\\b${term}\\b`, 'gi');
             let match: RegExpExecArray | null;
             while ((match = pattern.exec(text)) !== null) {
-              const line = doc.positionAt(match.index).line;
+              const line     = doc.positionAt(match.index).line;
               const lineText = doc.lineAt(line).text.trim();
-              // Filter out comment-only lines and bare import/require lines
-              if (lineText.startsWith('//') || lineText.startsWith('#') || lineText.startsWith('import') || lineText.startsWith('require')) { continue; }
-              deps.push({
-                filePath: vscode.workspace.asRelativePath(file),
+              candidates.push({
+                filePath:   vscode.workspace.asRelativePath(file),
                 lineNumber: line + 1,
                 tableName,
-                usage: lineText.slice(0, 100),
-                severity: this.classifyDepSeverity(lineText),
+                lineText:   lineText.slice(0, 120),
               });
-              foundInFile = true;
-              break; // one match per (table + file) pair
+              break; // one candidate per (term + file) pair
             }
           }
         }
-      } catch {
-        // skip unreadable files
+      } catch { /* skip unreadable files */ }
+    }
+
+    if (candidates.length === 0) {
+      return { deps: [], filesScanned: files.length, totalFilesEst: files.length };
+    }
+
+    // Phase 2 (AI): batch classify all candidates in one Granite call
+    const batchSize = 20;
+    const deps: AppDependency[] = [];
+
+    for (let i = 0; i < candidates.length; i += batchSize) {
+      const batch = candidates.slice(i, i + batchSize);
+
+      const system = `You are a code reviewer analyzing database dependencies.
+For each code snippet, decide if it is a REAL runtime dependency on the specified table
+(e.g. a query, ORM call, or write operation at runtime) or a false positive
+(comment, test fixture, migration script, documentation, import statement).
+Return ONLY valid JSON with no extra text or markdown fences:
+{
+  "results": [
+    {
+      "filePath": "<same as input>",
+      "lineNumber": <same as input>,
+      "tableName": "<same as input>",
+      "isDependency": true,
+      "severity": "critical|high|medium|low",
+      "reason": "<brief explanation>"
+    }
+  ]
+}
+Severity guide: critical=DELETE/DROP/TRUNCATE, high=UPDATE/INSERT, medium=SELECT/fetch, low=indirect.`;
+
+      const snippets = batch
+        .map((c, idx) => `${idx + 1}. ${c.filePath}:${c.lineNumber} [table: ${c.tableName}]\n   ${c.lineText}`)
+        .join('\n');
+      const user = `Classify these code snippets:\n${snippets}`;
+
+      try {
+        const raw  = await this.ai.ask(system, user, 1024);
+        const json = this.extractJson(raw);
+        const data = JSON.parse(json) as {
+          results: {
+            filePath: string; lineNumber: number; tableName: string;
+            isDependency: boolean; severity: string; reason: string;
+          }[];
+        };
+        for (const r of data.results ?? []) {
+          if (r.isDependency) {
+            deps.push({
+              filePath:   r.filePath,
+              lineNumber: r.lineNumber,
+              tableName:  r.tableName,
+              usage:      r.reason,
+              severity:   this.normalizeRiskLevel(r.severity),
+            });
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`findAppDependencies AI error: ${err}`);
+        // Fallback: include all candidates from this batch as medium severity
+        for (const c of batch) {
+          deps.push({
+            filePath:   c.filePath,
+            lineNumber: c.lineNumber,
+            tableName:  c.tableName,
+            usage:      c.lineText,
+            severity:   'medium',
+          });
+        }
       }
     }
 
-    return deps.slice(0, 50); // cap results
-  }
-
-  /**
-   * Derives the ORM model class name from a table name.
-   * "users" → "User",  "order_items" → "OrderItem",  "categories" → "Category"
-   */
-  private deriveModelName(tableName: string): string {
-    // Split on underscores, capitalise each word, join
-    const pascal = tableName
-      .split('_')
-      .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-      .join('');
-    // Strip common plural suffixes to get the singular model name
-    if (pascal.endsWith('ies')) { return pascal.slice(0, -3) + 'y'; }  // categories → Category
-    if (pascal.endsWith('ses')) { return pascal.slice(0, -2); }          // statuses → Status
-    if (pascal.endsWith('s') && !pascal.endsWith('ss')) { return pascal.slice(0, -1); } // users → User
-    return pascal;
-  }
-
-  private classifyDepSeverity(lineText: string): RiskLevel {
-    const line = lineText.toLowerCase();
-    if (/delete|drop|truncate|remove/.test(line)) { return 'critical'; }
-    if (/update|alter|modify|insert/.test(line)) { return 'high'; }
-    if (/select|find|fetch|get|query/.test(line)) { return 'medium'; }
-    return 'low';
+    return {
+      deps:          deps.slice(0, 50),
+      filesScanned:  files.length,
+      totalFilesEst: files.length,
+    };
   }
 
   // ──────────────────────────────────────────────
-  // Dimension 3: Data Integrity Risks
+  // Dimension 3: AI Data Integrity Risks
   // ──────────────────────────────────────────────
 
-  private async assessDataIntegrityRisks(parsed: ReturnType<typeof parseSql>): Promise<DataIntegrityRisk[]> {
-    const risks: DataIntegrityRisk[] = [];
-    // Use original SQL with /i flag — no uppercase needed
-    const sql = parsed.rawSql;
+  private async assessDataIntegrityRisks(
+    parsed: Awaited<ReturnType<typeof parseSqlAI>>,
+    activeSchema: { getTable(name: string): TableDefinition | null }
+  ): Promise<{ risks: DataIntegrityRisk[]; confidence: DimensionConfidence }> {
+    const rowCountContext = parsed.tables
+      .map(t => {
+        const tbl = activeSchema.getTable(t);
+        return tbl?.rowCount !== undefined ? `${t}=${tbl.rowCount.toLocaleString()} rows` : `${t}=row count unknown`;
+      })
+      .join(', ');
 
-    if (parsed.operation === 'DELETE' && !/WHERE/i.test(sql)) {
-      risks.push({
-        description: 'DELETE without WHERE clause — will remove ALL rows in the table',
-        severity: 'critical',
-      });
-    }
-    if (parsed.operation === 'UPDATE' && !/WHERE/i.test(sql)) {
-      risks.push({
-        description: 'UPDATE without WHERE clause — will update ALL rows in the table',
-        severity: 'critical',
-      });
-    }
-    if (/ALTER.*DROP\s+COLUMN/i.test(sql)) {
-      risks.push({
-        description: 'DROP COLUMN is irreversible — ensure a backup exists before proceeding',
-        severity: 'high',
-      });
-    }
-    if (/NOT\s+NULL/i.test(sql) && !/DEFAULT/i.test(sql) && !/ADD\s+COLUMN/i.test(sql)) {
-      risks.push({
-        description: 'Adding NOT NULL constraint without DEFAULT will fail if any existing row has NULL',
-        severity: 'high',
-      });
-    }
-    if (/\bCASCADE\b/i.test(sql)) {
-      risks.push({
-        description: 'CASCADE operation will propagate to all child tables — audit foreign key references',
-        severity: 'medium',
-      });
-    }
-    // Step 4 — 4 additional rules
-    if (/ALTER\s+TABLE.*DROP\s+FOREIGN\s+KEY/i.test(sql)) {
-      risks.push({
-        description: 'DROP FOREIGN KEY removes referential integrity — orphan rows may be created',
-        severity: 'high',
-      });
-    }
-    if (/ALTER\s+TABLE.*DROP\s+PRIMARY\s+KEY/i.test(sql)) {
-      risks.push({
-        description: 'DROP PRIMARY KEY makes the table unaddressable by index — severe performance impact',
-        severity: 'high',
-      });
-    }
-    if (/CREATE\s+UNIQUE\s+INDEX/i.test(sql)) {
-      risks.push({
-        description: 'CREATE UNIQUE INDEX will fail if existing rows contain duplicate values in the indexed column(s)',
-        severity: 'high',
-      });
-    }
-    if (/ENGINE\s*=/i.test(sql)) {
-      risks.push({
-        description: 'Changing storage ENGINE (e.g. InnoDB → MyISAM) rewrites the entire table and is not easily reversible',
-        severity: 'medium',
-      });
-    }
+    const config  = vscode.workspace.getConfiguration('dbscope');
+    const dbType  = config.get<string>('dbType', 'postgresql');
 
-    return risks;
+    const system = `You are a database reliability engineer specializing in migration safety.
+Identify ALL data integrity risks in the given SQL statement.
+Consider: missing WHERE clauses, lock escalation on large tables, foreign key violations,
+constraint failures on existing data, irreversible operations, and transaction size risks.
+Score your confidence (0-100) based on how much runtime context was provided
+(row counts, FK graph, database version, database type).
+Return ONLY valid JSON with no extra text or markdown fences:
+{
+  "risks": [
+    { "description": "<risk description>", "severity": "critical|high|medium|low" }
+  ],
+  "confidenceScore": 70,
+  "confidenceReason": "<what context was available or missing>"
+}`;
+
+    const user = `SQL: ${parsed.rawSql}
+Database type: ${dbType}
+Table row counts: ${rowCountContext || 'none available'}`;
+
+    try {
+      const raw  = await this.ai.ask(system, user, 768);
+      const json = this.extractJson(raw);
+      const data = JSON.parse(json) as {
+        risks:            { description: string; severity: string }[];
+        confidenceScore:  number;
+        confidenceReason: string;
+      };
+      return {
+        risks: (data.risks ?? []).map(r => ({
+          description: r.description,
+          severity:    this.normalizeRiskLevel(r.severity),
+        })),
+        confidence: {
+          confidenceScore:  data.confidenceScore  ?? 50,
+          confidenceReason: data.confidenceReason ?? '',
+        },
+      };
+    } catch (err) {
+      this.logger.warn(`assessDataIntegrityRisks AI error: ${err}`);
+      return { risks: [], confidence: UNAVAILABLE };
+    }
   }
 
   // ──────────────────────────────────────────────
-  // Dimension 4: Documentation Drift
+  // Dimension 4: Documentation Drift (kept as I/O scan, AI classifies confidence)
   // ──────────────────────────────────────────────
 
   private async detectDocumentationDrift(tables: string[]): Promise<DocumentationDrift[]> {
@@ -268,75 +370,260 @@ export class BlastRadiusAnalyzer {
 
     for (const file of docFiles) {
       try {
-        const relPath = vscode.workspace.asRelativePath(file);
+        const relPath   = vscode.workspace.asRelativePath(file);
         const isDocFile = /readme|api|schema/i.test(relPath);
-        if (!isDocFile) { continue; } // skip early — no need to open non-doc files
+        if (!isDocFile) { continue; }
 
-        const doc = await vscode.workspace.openTextDocument(file);
+        const doc  = await vscode.workspace.openTextDocument(file);
         const text = doc.getText().toLowerCase();
 
         for (const tableName of tables) {
           if (!text.includes(tableName.toLowerCase())) {
             drifts.push({
-              filePath: relPath,
-              issue: `Table "${tableName}" is not documented in ${path.basename(file.fsPath)}`,
+              filePath:   relPath,
+              issue:      `Table "${tableName}" is not documented in ${path.basename(file.fsPath)}`,
               suggestion: `Add documentation for the ${tableName} table to ${relPath}`,
             });
           }
         }
-      } catch {
-        // skip unreadable files
-      }
+      } catch { /* skip unreadable files */ }
     }
 
     return drifts.slice(0, 20);
   }
 
   // ──────────────────────────────────────────────
-  // Risk Score (1-10)
+  // AI Risk Score + Explanation + All 5 Confidence Scores (single Granite call)
   // ──────────────────────────────────────────────
 
-  private calculateRiskScore(
-    schema: SchemaImpact,
-    deps: AppDependency[],
-    data: DataIntegrityRisk[],
-    docs: DocumentationDrift[],
-    tables: string[]           // Step 5: needed for row-count weighting
-  ): number {
-    // Base: 0. Each dimension contributes up to a capped amount. Max total = 10.
-    let score = 0;
-    // Dimension 1 — Schema (max 5): breaking changes worth 2 each (cap 4), cascades 0.5 each (cap 1)
-    score += Math.min(schema.breakingChanges.length * 2, 4);
-    score += Math.min(schema.cascadeEffects.length * 0.5, 1);
-    // Dimension 2 — App deps (max 2): critical usages found in source files
-    score += Math.min(deps.filter(d => d.severity === 'critical').length, 2);
-    // Dimension 3 — Data integrity (max 3): critical=2pts, high=1pt
-    score += Math.min(data.filter(r => r.severity === 'critical').length * 2, 2);
-    score += Math.min(data.filter(r => r.severity === 'high').length, 1);
-    // Dimension 4 — Docs drift (max 1): 0.25 per undocumented table
-    score += Math.min(docs.length * 0.25, 1);
+  private async calculateRiskScore(
+    schema:   SchemaImpact,
+    deps:     AppDependency[],
+    data:     DataIntegrityRisk[],
+    docs:     DocumentationDrift[],
+    tables:   string[],
+    context:  {
+      filesScanned:   number;
+      totalFilesEst:  number;
+      schemaLoaded:   boolean;
+      rowCountsKnown: boolean;
+      docFilesFound:  boolean;
+    },
+    activeSchema: { getTable(name: string): TableDefinition | null }
+  ): Promise<{
+    score:       number;
+    explanation: string;
+    suggestions: string[];
+    confidence:  AnalysisConfidence;
+  }> {
+    const rowInfo = tables.map(t => {
+      const tbl = activeSchema.getTable(t);
+      return tbl?.rowCount !== undefined ? `${t}: ${tbl.rowCount.toLocaleString()} rows` : `${t}: row count unknown`;
+    }).join('; ');
 
-    // Step 5 — Row-count size multiplier: large tables amplify risk
-    const sizeFactor = this.getTableSizeFactor(tables);
-    score = score * sizeFactor;
+    const system = `You are a senior DBA and migration risk expert.
+Given the full analysis results for a SQL migration, score the overall risk and
+provide per-dimension confidence scores reflecting how much context was available.
+Score risk from 1 (trivial) to 10 (catastrophic).
+Score each confidence from 0 (no context at all) to 100 (complete context).
+Also provide up to 3 actionable suggestions for the developer.
+Return ONLY valid JSON with no extra text or markdown fences:
+{
+  "score": 7,
+  "explanation": "<2-3 sentence plain-English explanation of why this score>",
+  "suggestions": ["<actionable suggestion 1>", "<actionable suggestion 2>"],
+  "confidence": {
+    "overall":            { "confidenceScore": 62, "confidenceReason": "<reason>" },
+    "schemaImpact":       { "confidenceScore": 90, "confidenceReason": "<reason>" },
+    "appDependencies":    { "confidenceScore": 55, "confidenceReason": "<reason>" },
+    "dataIntegrityRisks": { "confidenceScore": 40, "confidenceReason": "<reason>" },
+    "documentationDrift": { "confidenceScore": 70, "confidenceReason": "<reason>" }
+  }
+}`;
 
-    // Always at least 1 for any analyzed SQL
-    return Math.min(Math.max(Math.round(score), 1), 10);
+    const user = `SQL migration analysis:
+
+Breaking schema changes: ${schema.breakingChanges.length > 0 ? schema.breakingChanges.join('; ') : 'none'}
+Non-breaking schema changes: ${schema.nonBreakingChanges.length > 0 ? schema.nonBreakingChanges.join('; ') : 'none'}
+Cascade effects: ${schema.cascadeEffects.length > 0 ? schema.cascadeEffects.join('; ') : 'none'}
+
+App dependencies found: ${deps.length} files
+  Critical: ${deps.filter(d => d.severity === 'critical').length}
+  High:     ${deps.filter(d => d.severity === 'high').length}
+  Medium:   ${deps.filter(d => d.severity === 'medium').length}
+Files scanned: ${context.filesScanned} of ~${context.totalFilesEst} total
+
+Data integrity risks: ${data.length > 0 ? data.map(r => `[${r.severity}] ${r.description}`).join('; ') : 'none'}
+
+Documentation drift: ${docs.length} tables undocumented
+
+Table sizes: ${rowInfo || 'none available'}
+Schema loaded: ${context.schemaLoaded}
+Row counts known: ${context.rowCountsKnown}
+Documentation files found: ${context.docFilesFound}`;
+
+    try {
+      const raw  = await this.ai.ask(system, user, 1024);
+      const json = this.extractJson(raw);
+      const d    = JSON.parse(json) as {
+        score:       number;
+        explanation: string;
+        suggestions: string[];
+        confidence: {
+          overall:            { confidenceScore: number; confidenceReason: string };
+          schemaImpact:       { confidenceScore: number; confidenceReason: string };
+          appDependencies:    { confidenceScore: number; confidenceReason: string };
+          dataIntegrityRisks: { confidenceScore: number; confidenceReason: string };
+          documentationDrift: { confidenceScore: number; confidenceReason: string };
+        };
+      };
+
+      return {
+        score:       Math.min(Math.max(Math.round(d.score ?? 5), 1), 10),
+        explanation: d.explanation ?? '',
+        suggestions: d.suggestions ?? [],
+        confidence: {
+          overall:            d.confidence?.overall            ?? UNAVAILABLE,
+          schemaImpact:       d.confidence?.schemaImpact       ?? UNAVAILABLE,
+          appDependencies:    d.confidence?.appDependencies     ?? UNAVAILABLE,
+          dataIntegrityRisks: d.confidence?.dataIntegrityRisks ?? UNAVAILABLE,
+          documentationDrift: d.confidence?.documentationDrift ?? UNAVAILABLE,
+        },
+      };
+    } catch (err) {
+      this.logger.warn(`calculateRiskScore AI error: ${err}`);
+      // Arithmetic fallback so the tool still works without credentials
+      let score = 0;
+      score += Math.min(schema.breakingChanges.length * 2, 4);
+      score += Math.min(schema.cascadeEffects.length * 0.5, 1);
+      score += Math.min(deps.filter(d => d.severity === 'critical').length, 2);
+      score += Math.min(data.filter(r => r.severity === 'critical').length * 2, 2);
+      score += Math.min(data.filter(r => r.severity === 'high').length, 1);
+      return {
+        score:       Math.min(Math.max(Math.round(score), 1), 10),
+        explanation: 'AI unavailable — score computed from rule-based heuristics.',
+        suggestions: [],
+        confidence: {
+          overall:            UNAVAILABLE,
+          schemaImpact:       UNAVAILABLE,
+          appDependencies:    UNAVAILABLE,
+          dataIntegrityRisks: UNAVAILABLE,
+          documentationDrift: UNAVAILABLE,
+        },
+      };
+    }
   }
 
-  /** Returns a multiplier based on the largest rowCount of affected tables. */
-  private getTableSizeFactor(tables: string[]): number {
-    let maxRows = 0;
+  // ──────────────────────────────────────────────
+  // AI Rollback SQL Generator
+  // ──────────────────────────────────────────────
+
+  private async buildRollbackSuggestions(
+    parsed: Awaited<ReturnType<typeof parseSqlAI>>,
+    activeSchema: { getTable(name: string): TableDefinition | null }
+  ): Promise<RollbackSuggestion[]> {
+    const config  = vscode.workspace.getConfiguration('dbscope');
+    const dbType  = config.get<string>('dbType', 'postgresql');
+    const schemaContext = this.buildSchemaContext(parsed.tables, activeSchema);
+
+    const system = `You are a database migration engineer specializing in rollback strategies.
+Write the exact SQL to UNDO the given migration statement.
+Consider the database type and any schema context provided.
+For each rollback, assign a safety level:
+  "safe"           — can be run automatically with no data risk
+  "manual_review"  — needs a human to verify before running
+  "destructive"    — data was lost; a point-in-time backup is required
+If no rollback is possible (e.g. DELETE / TRUNCATE), explain why and set safetyLevel to "destructive".
+Return ONLY valid JSON with no extra text or markdown fences:
+{
+  "rollbacks": [
+    {
+      "description": "<what this rollback does>",
+      "sql": "<ready-to-run SQL>",
+      "safetyLevel": "safe|manual_review|destructive"
+    }
+  ]
+}`;
+
+    const user = `Migration SQL: ${parsed.rawSql}
+Database type: ${dbType}
+${schemaContext}`;
+
+    try {
+      const raw  = await this.ai.ask(system, user, 768);
+      const json = this.extractJson(raw);
+      const data = JSON.parse(json) as {
+        rollbacks: { description: string; sql: string; safetyLevel: string }[];
+      };
+      return (data.rollbacks ?? []).map(r => ({
+        description: r.description,
+        sql:         r.sql,
+        safetyLevel: (r.safetyLevel === 'safe' || r.safetyLevel === 'manual_review' || r.safetyLevel === 'destructive')
+          ? r.safetyLevel
+          : 'manual_review',
+      }));
+    } catch (err) {
+      this.logger.warn(`buildRollbackSuggestions AI error: ${err}`);
+      return [{
+        description: 'Rollback generation unavailable — AI credentials not configured',
+        sql:         '-- Configure dbscope.watsonxApiKey to enable AI-powered rollback generation',
+        safetyLevel: 'manual_review',
+      }];
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // Export to JSON file
+  // ──────────────────────────────────────────────
+
+  async exportResult(result: BlastRadiusResult, targetDir: string): Promise<string> {
+    const tableSlug = (result.affectedTables[0] ?? 'unknown').replace(/[^a-z0-9]/gi, '-');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename  = `blast-radius-${tableSlug}-${timestamp}.json`;
+    const filePath  = path.join(targetDir, filename);
+    fs.writeFileSync(filePath, JSON.stringify(result, null, 2), 'utf-8');
+    this.logger.info(`BlastRadius: exported analysis to ${filePath}`);
+    return filePath;
+  }
+
+  // ──────────────────────────────────────────────
+  // Helpers
+  // ──────────────────────────────────────────────
+
+  private buildSchemaContext(tables: string[], activeSchema: { getTable(name: string): TableDefinition | null }): string {
+    const parts: string[] = [];
     for (const tableName of tables) {
-      const table = this.schemaState.getTable(tableName);
-      if (table?.rowCount && table.rowCount > maxRows) {
-        maxRows = table.rowCount;
+      const table = activeSchema.getTable(tableName);
+      if (table) {
+        const cols = Object.values(table.columns)
+          .map(c => `${c.name} ${c.type}${c.nullable ? '' : ' NOT NULL'}${c.isPrimaryKey ? ' PK' : ''}${c.isForeignKey ? ` FK->${c.referencesTable}.${c.referencesColumn}` : ''}`)
+          .join(', ');
+        const rowInfo = table.rowCount !== undefined ? ` (${table.rowCount.toLocaleString()} rows)` : '';
+        parts.push(`${tableName}${rowInfo}: [${cols}]`);
       }
     }
-    if (maxRows > 1_000_000) { return 1.5; }
-    if (maxRows > 100_000)   { return 1.25; }
-    if (maxRows > 10_000)    { return 1.1; }
-    return 1.0;
+    return parts.length > 0
+      ? `Schema:\n${parts.map(p => `  ${p}`).join('\n')}`
+      : 'Schema: not loaded — run "DB-Scope: Fetch Database Context" for higher confidence';
+  }
+
+  /** Extract the first JSON object from a Granite response that may contain markdown fences. */
+  private extractJson(raw: string): string {
+    // Try a ```json ... ``` block first
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenced) { return fenced[1].trim(); }
+    // Fall back to the first { ... } span
+    const bare = raw.match(/\{[\s\S]*\}/);
+    if (bare) { return bare[0]; }
+    throw new Error(`No JSON found in AI response: ${raw.slice(0, 100)}`);
+  }
+
+  private normalizeRiskLevel(s: string): RiskLevel {
+    const lower = (s ?? '').toLowerCase();
+    if (lower === 'critical') { return 'critical'; }
+    if (lower === 'high')     { return 'high'; }
+    if (lower === 'medium')   { return 'medium'; }
+    return 'low';
   }
 
   private scoreToLevel(score: number): RiskLevel {
@@ -346,148 +633,15 @@ export class BlastRadiusAnalyzer {
     return 'low';
   }
 
-  private buildSuggestions(
-    schema: SchemaImpact,
-    deps: AppDependency[],
-    data: DataIntegrityRisk[],
-    score: number
-  ): string[] {
-    const suggestions: string[] = [];
-    if (schema.breakingChanges.some(c => c.includes('NOT NULL'))) {
-      suggestions.push('Make the column NULLABLE first, backfill data, then add the NOT NULL constraint');
-    }
-    if (schema.breakingChanges.some(c => c.includes('DROP'))) {
-      suggestions.push('Consider renaming the column/table first (soft-delete approach) instead of immediate DROP');
-    }
-    if (data.some(r => r.description.includes('without WHERE'))) {
-      suggestions.push('Add a WHERE clause or use a transaction with a dry-run SELECT count first');
-    }
-    if (deps.length > 5) {
-      suggestions.push(`Update ${deps.length} affected files before applying migration`);
-    }
-    if (score >= 7) {
-      suggestions.push('This migration scores HIGH RISK — require DBA approval before deploying to production');
-    }
-    return suggestions;
-  }
-
-  // ──────────────────────────────────────────────
-  // Step 2: Rollback SQL generator
-  // ──────────────────────────────────────────────
-
-  private buildRollbackSuggestions(parsed: ReturnType<typeof parseSql>): RollbackSuggestion[] {
-    const rollbacks: RollbackSuggestion[] = [];
-    const sql = parsed.rawSql;
-
-    // DROP TABLE → reconstruct CREATE TABLE from schema state
-    if (parsed.operation === 'DROP') {
-      for (const tableName of parsed.tables) {
-        const table = this.schemaState.getTable(tableName);
-        if (table) {
-          const cols = Object.values(table.columns)
-            .map(c => {
-              let def = `  ${c.name} ${c.type}`;
-              if (!c.nullable) { def += ' NOT NULL'; }
-              if (c.isPrimaryKey) { def += ' PRIMARY KEY'; }
-              return def;
-            })
-            .join(',\n');
-          rollbacks.push({
-            description: `Recreate table "${tableName}" from last known schema snapshot`,
-            sql: `CREATE TABLE IF NOT EXISTS ${tableName} (\n${cols}\n);`,
-            safetyLevel: 'manual_review',
-          });
-        } else {
-          rollbacks.push({
-            description: `Cannot auto-generate rollback for "${tableName}" — no schema snapshot available`,
-            sql: `-- Run "DB-Scope: Fetch Database Context" before the migration to enable auto-rollback`,
-            safetyLevel: 'destructive',
-          });
-        }
-      }
-      return rollbacks;
-    }
-
-    // ALTER TABLE DROP COLUMN → ADD COLUMN back
-    const dropColMatch = /ALTER\s+TABLE\s+(\w+)\s+DROP\s+COLUMN\s+(\w+)/i.exec(sql);
-    if (dropColMatch) {
-      const [, tbl, col] = dropColMatch;
-      const colDef = this.schemaState.getTable(tbl)?.columns[col];
-      const typePart = colDef ? `${colDef.type}${colDef.nullable ? '' : ' NOT NULL'}` : 'TEXT /* original type unknown */';
-      rollbacks.push({
-        description: `Re-add column "${col}" to "${tbl}"`,
-        sql: `ALTER TABLE ${tbl} ADD COLUMN ${col} ${typePart};`,
-        safetyLevel: colDef ? 'safe' : 'manual_review',
-      });
-    }
-
-    // ALTER TABLE ADD COLUMN → DROP COLUMN
-    const addColMatch = /ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/i.exec(sql);
-    if (addColMatch) {
-      const [, tbl, col] = addColMatch;
-      rollbacks.push({
-        description: `Remove newly added column "${col}" from "${tbl}"`,
-        sql: `ALTER TABLE ${tbl} DROP COLUMN ${col};`,
-        safetyLevel: 'safe',
-      });
-    }
-
-    // ALTER TABLE RENAME COLUMN a TO b → RENAME COLUMN b TO a
-    const renameColMatch = /ALTER\s+TABLE\s+(\w+)\s+RENAME\s+COLUMN\s+(\w+)\s+TO\s+(\w+)/i.exec(sql);
-    if (renameColMatch) {
-      const [, tbl, from, to] = renameColMatch;
-      rollbacks.push({
-        description: `Rename column "${to}" back to "${from}" on table "${tbl}"`,
-        sql: `ALTER TABLE ${tbl} RENAME COLUMN ${to} TO ${from};`,
-        safetyLevel: 'safe',
-      });
-    }
-
-    // ALTER TABLE RENAME TABLE a TO b → RENAME TABLE b TO a  (MySQL syntax)
-    const renameTblMatch = /RENAME\s+TABLE\s+(\w+)\s+TO\s+(\w+)/i.exec(sql);
-    if (renameTblMatch) {
-      const [, from, to] = renameTblMatch;
-      rollbacks.push({
-        description: `Rename table "${to}" back to "${from}"`,
-        sql: `RENAME TABLE ${to} TO ${from};`,
-        safetyLevel: 'safe',
-      });
-    }
-
-    // CREATE INDEX → DROP INDEX
-    const createIdxMatch = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(\w+)/i.exec(sql);
-    if (createIdxMatch) {
-      const [, idxName] = createIdxMatch;
-      rollbacks.push({
-        description: `Drop the newly created index "${idxName}"`,
-        sql: `DROP INDEX ${idxName};`,
-        safetyLevel: 'safe',
-      });
-    }
-
-    // DELETE / TRUNCATE — no auto-rollback possible
-    if (parsed.operation === 'DELETE' || parsed.operation === 'TRUNCATE') {
-      rollbacks.push({
-        description: 'No automatic rollback available for data deletion',
-        sql: '-- Take a point-in-time backup (pg_dump / mysqldump) BEFORE running this statement.',
-        safetyLevel: 'destructive',
-      });
-    }
-
-    return rollbacks;
-  }
-
-  // ──────────────────────────────────────────────
-  // Step 8: Export analysis result to JSON file
-  // ──────────────────────────────────────────────
-
-  async exportResult(result: BlastRadiusResult, targetDir: string): Promise<string> {
-    const tableSlug = (result.affectedTables[0] ?? 'unknown').replace(/[^a-z0-9]/gi, '-');
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const filename = `blast-radius-${tableSlug}-${timestamp}.json`;
-    const filePath = path.join(targetDir, filename);
-    fs.writeFileSync(filePath, JSON.stringify(result, null, 2), 'utf-8');
-    this.logger.info(`BlastRadius: exported analysis to ${filePath}`);
-    return filePath;
+  /** Derives the ORM model class name: "order_items" → "OrderItem", "users" → "User" */
+  private deriveModelName(tableName: string): string {
+    const pascal = tableName
+      .split('_')
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join('');
+    if (pascal.endsWith('ies')) { return pascal.slice(0, -3) + 'y'; }
+    if (pascal.endsWith('ses')) { return pascal.slice(0, -2); }
+    if (pascal.endsWith('s') && !pascal.endsWith('ss')) { return pascal.slice(0, -1); }
+    return pascal;
   }
 }

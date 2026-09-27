@@ -72,6 +72,21 @@
           "type": "boolean",
           "default": true,
           "description": "Enable real-time SQL diagnostics and warnings"
+        },
+        "dbscope.watsonxUrl": {
+          "type": "string",
+          "default": "https://us-south.ml.cloud.ibm.com",
+          "description": "IBM watsonx.ai region URL (e.g. https://us-south.ml.cloud.ibm.com)"
+        },
+        "dbscope.watsonxApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "IBM Cloud API key for watsonx.ai authentication (required for AI-powered analysis)"
+        },
+        "dbscope.watsonxProjectId": {
+          "type": "string",
+          "default": "",
+          "description": "watsonx.ai project ID found in the IBM Cloud project URL"
         }
       }
     },
