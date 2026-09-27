@@ -6,3 +6,5 @@ BOB_INSTRUCTIONS.md
 .DS_Store
 *.vsix
 .vscode/settings.json
+.env
+.env.*
