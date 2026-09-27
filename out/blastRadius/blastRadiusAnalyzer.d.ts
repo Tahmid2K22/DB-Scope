@@ -5,14 +5,12 @@ export declare class BlastRadiusAnalyzer {
     private readonly schemaState;
     private readonly logger;
     private readonly ai;
+    private analysisCache;
     constructor(schemaState: SchemaStateMap, ai?: WatsonxClient);
     analyze(sql: string): Promise<BlastRadiusResult>;
-    private analyzeSchemaImpact;
+    private performConsolidatedAnalysis;
     private findAppDependencies;
-    private assessDataIntegrityRisks;
     private detectDocumentationDrift;
-    private calculateRiskScore;
-    private buildRollbackSuggestions;
     exportResult(result: BlastRadiusResult, targetDir: string): Promise<string>;
     private buildSchemaContext;
     /** Extract the first JSON object from a Granite response that may contain markdown fences. */
