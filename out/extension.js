@@ -155,7 +155,7 @@ async function activate(context) {
             return;
         }
         const sql = editor.document.getText(editor.selection) || editor.document.getText();
-        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Running blast radius analysis...' }, () => blastRadiusAnalyzer.analyze(sql));
+        const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Running impact analysis...' }, () => blastRadiusAnalyzer.analyze(sql));
         const saveUri = await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.file(`blast-radius-${Date.now()}.json`),
             filters: { 'JSON Report': ['json'] },

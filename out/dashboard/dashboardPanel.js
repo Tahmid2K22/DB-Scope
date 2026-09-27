@@ -79,7 +79,7 @@ class DashboardPanel {
     titleFor(type) {
         const map = {
             overview: 'Overview',
-            blastRadius: 'Blast Radius Analysis',
+            blastRadius: 'Impact Analysis',
             merge: 'Merge Conflict Report',
             duplicates: 'Duplicate Detector',
             history: 'Schema Timeline',
@@ -457,7 +457,7 @@ class DashboardPanel {
       <div class="header-title">DB-Scope</div>
       <div class="nav-tabs">
         <button class="nav-tab active" data-view="overview" onclick="switchTab('overview')">Overview</button>
-        <button class="nav-tab" data-view="blastRadius" onclick="switchTab('blastRadius')">Blast Radius</button>
+        <button class="nav-tab" data-view="blastRadius" onclick="switchTab('blastRadius')">Impact</button>
         <button class="nav-tab" data-view="merge" onclick="switchTab('merge')">Merge Analysis</button>
         <button class="nav-tab" data-view="duplicates" onclick="switchTab('duplicates')">Duplicates</button>
         <button class="nav-tab" data-view="history" onclick="switchTab('history')">Timeline</button>
@@ -577,7 +577,7 @@ class DashboardPanel {
 
 <div class="card">
   <div class="card-title">Quick Actions</div>
-  <button class="btn" onclick="runCommand('analyzeBlastRadius')">Analyze Blast Radius</button>
+  <button class="btn" onclick="runCommand('analyzeBlastRadius')">Analyze Impact</button>
   <button class="btn" onclick="runCommand('detectDuplicates')">Detect Duplicates</button>
   <button class="btn" onclick="runCommand('mergeDatabases')">Merge Analysis</button>
   <button class="btn" onclick="runCommand('fetchContext')">Fetch Context</button>
@@ -587,7 +587,7 @@ class DashboardPanel {
 <div class="card">
   <div class="card-title">Capabilities</div>
   <ul>
-    <li><strong>Blast Radius Analysis</strong> -- 4-dimension migration impact assessment</li>
+    <li><strong>Impact Analysis</strong> -- 4-dimension migration impact assessment</li>
     <li><strong>Duplicate Detection</strong> -- semantic duplicate column and table finder</li>
     <li><strong>Merge Conflict Analysis</strong> -- cross-schema structural diff with AI enrichment</li>
     <li><strong>Real-time Diagnostics</strong> -- SQL error detection and quick fixes</li>
@@ -598,7 +598,7 @@ class DashboardPanel {
 <p class="muted">Hover over any SQL query in the editor for instant impact tooltips.</p>`;
     }
     // --------------------------------------------------
-    // View: Blast Radius
+    // View: Impact Analysis
     // --------------------------------------------------
     blastRadiusHtml(r) {
         const riskColor = `badge-${r.riskLevel}`;
@@ -619,7 +619,7 @@ class DashboardPanel {
       </tr>`;
         }).join('');
         return `
-<h1>Blast Radius Analysis <span class="badge ${riskColor}">${r.riskLevel.toUpperCase()} -- ${r.riskScore}/10</span></h1>
+<h1>Impact Analysis <span class="badge ${riskColor}">${r.riskLevel.toUpperCase()} -- ${r.riskScore}/10</span></h1>
 <div class="score-bar"><div class="score-fill" style="width:${scoreWidth}%;background:${scoreColor}"></div></div>
 <p class="muted" style="margin-top:8px">Analyzed: <code>${this.esc(r.sql.slice(0, 120))}${r.sql.length > 120 ? '...' : ''}</code></p>
 <p><strong>Affected Tables:</strong> ${r.affectedTables.map(t => `<span class="tag">${this.esc(t)}</span>`).join(' ')}</p>

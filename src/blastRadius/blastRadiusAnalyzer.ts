@@ -1,5 +1,5 @@
 // src/blastRadius/blastRadiusAnalyzer.ts
-// Member 1 — AI-Powered Blast Radius Analyzer
+// Member 1 — AI-Powered Impact Analyzer
 // Every analysis decision is made by IBM watsonx.ai Granite (ibm/granite-3-3-8b-instruct).
 // Deterministic regex has been removed — AI understands context, dialect, and nuance.
 

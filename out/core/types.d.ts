@@ -50,7 +50,7 @@ export interface DimensionConfidence {
     confidenceReason: string;
 }
 /**
- * Per-dimension + overall AI confidence for a single blast radius analysis.
+ * Per-dimension + overall AI confidence for a single impact analysis.
  */
 export interface AnalysisConfidence {
     overall: DimensionConfidence;

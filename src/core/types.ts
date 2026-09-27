@@ -53,7 +53,7 @@ export interface SchemaSnapshot {
 }
 
 // ──────────────────────────────────────────────
-// Blast Radius Types
+// Impact Analysis Types
 // ──────────────────────────────────────────────
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
@@ -68,7 +68,7 @@ export interface DimensionConfidence {
 }
 
 /**
- * Per-dimension + overall AI confidence for a single blast radius analysis.
+ * Per-dimension + overall AI confidence for a single impact analysis.
  */
 export interface AnalysisConfidence {
   overall: DimensionConfidence;

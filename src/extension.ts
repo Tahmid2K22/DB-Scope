@@ -157,7 +157,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const sql = editor.document.getText(editor.selection) || editor.document.getText();
       const result = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Running blast radius analysis...' },
+        { location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Running impact analysis...' },
         () => blastRadiusAnalyzer.analyze(sql)
       );
       const saveUri = await vscode.window.showSaveDialog({
