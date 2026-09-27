@@ -1,84 +1,30 @@
 // src/diagnostics/sqlDiagnosticProvider.ts
 // Member 2 — Real-Time SQL Diagnostics
-// Detects logical errors as you type: red squiggles, interruption warnings,
-// and risk-based diagnostics for destructive SQL patterns.
+// Orchestrates the SQL tokenizer, schema-aware rules, and legacy pattern rules.
+// Produces VS Code squiggles and (optionally) modal alerts for destructive ops.
 
 import * as vscode from 'vscode';
 import { SchemaStateMap } from '../core/schemaStateMap';
 import { ContextManager } from '../contextManager/contextManager';
-import { parseSql } from '../utils/sqlParser';
-import { SqlDiagnostic, DiagnosticSeverity } from '../core/types';
+import { SqlDiagnostic } from '../core/types';
 import { Logger } from '../utils/logger';
+import { splitSqlStatements } from './sqlTokenizer';
+import { runSchemaRules, runPatternRules } from './schemaDiagnostics';
 
-interface DiagnosticRule {
-  pattern: RegExp;
-  message: string;
-  severity: DiagnosticSeverity;
-  suggestion?: string;
-  showInterrupt?: boolean; // Show a modal warning popup
-}
-
-const DIAGNOSTIC_RULES: DiagnosticRule[] = [
-  {
-    pattern: /\bDROP\s+(?:TABLE|COLUMN|DATABASE)\b/i,
-    message: 'Destructive operation: This will permanently remove data.',
-    severity: 'error',
-    suggestion: 'Consider using a soft-delete or rename approach first.',
-    showInterrupt: true,
-  },
-  {
-    pattern: /\bTRUNCATE\b/i,
-    message: 'TRUNCATE removes ALL rows — this is irreversible without a backup.',
-    severity: 'error',
-    suggestion: 'Use a DELETE with WHERE clause if you only need to remove some rows.',
-    showInterrupt: true,
-  },
-  {
-    pattern: /\bDELETE\s+FROM\b(?![^;]*WHERE)/i,
-    message: 'DELETE without WHERE will remove ALL rows in the table.',
-    severity: 'error',
-    suggestion: 'Add a WHERE clause to target specific rows.',
-    showInterrupt: true,
-  },
-  {
-    pattern: /\bUPDATE\s+\w+\s+SET\b(?![^;]*WHERE)/i,
-    message: 'UPDATE without WHERE will modify ALL rows in the table.',
-    severity: 'error',
-    suggestion: 'Add a WHERE clause to target specific rows.',
-    showInterrupt: true,
-  },
-  {
-    pattern: /ALTER\s+TABLE\s+\w+\s+ADD\s+COLUMN\s+\w+\s+\w+\s+NOT\s+NULL(?!\s+DEFAULT)/i,
-    message: 'NOT NULL column without DEFAULT will fail on existing rows.',
-    severity: 'warning',
-    suggestion: 'Add a DEFAULT value or make the column NULLABLE first, then backfill.',
-  },
-  {
-    pattern: /\bDROP\s+INDEX\b/i,
-    message: 'Dropping an index may slow down queries that rely on it.',
-    severity: 'warning',
-    suggestion: 'Check query performance before removing this index.',
-  },
-  {
-    pattern: /\bSELECT\s+\*/i,
-    message: 'SELECT * fetches all columns — can be slow and fragile.',
-    severity: 'info',
-    suggestion: 'Specify only the columns you need for better performance and clarity.',
-  },
-  {
-    pattern: /ALTER\s+TABLE\s+\w+\s+RENAME\b/i,
-    message: 'Renaming a table/column breaks all queries and ORM mappings that reference it.',
-    severity: 'warning',
-    suggestion: 'Add an alias or view layer before renaming to maintain backward compatibility.',
-    showInterrupt: true,
-  },
-];
+// Codes that require a modal on save
+const MODAL_CODES = new Set([
+  'DBS-DESTRUCT-001',
+  'DBS-DESTRUCT-002',
+  'DBS-DESTRUCT-003',
+]);
 
 export class SqlDiagnosticProvider {
   private readonly logger = Logger.getInstance();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly DEBOUNCE_MS = 500;
-  private interruptShown = new Set<string>(); // Track shown interrupts per document
+
+  // Session-level set: `docUri:fingerprint` — prevents repeated modals for same statement
+  private readonly sessionAlerts = new Set<string>();
 
   constructor(
     private readonly schemaState: SchemaStateMap,
@@ -93,28 +39,52 @@ export class SqlDiagnosticProvider {
     vscode.workspace.onDidChangeTextDocument(evt => {
       const lang = evt.document.languageId;
       if (lang === 'sql' || evt.document.fileName.endsWith('.sql')) {
-        this.debounce(() => this.analyze(evt.document, collection));
+        this.debounce(() => this.analyze(evt.document, collection, 'edit'));
       }
     }, null, context.subscriptions);
 
     // Analyze when a SQL file is opened
     vscode.workspace.onDidOpenTextDocument(doc => {
       if (doc.languageId === 'sql' || doc.fileName.endsWith('.sql')) {
-        this.analyze(doc, collection);
+        this.analyze(doc, collection, 'open');
+      }
+    }, null, context.subscriptions);
+
+    // Analyze on save — also triggers modals
+    vscode.workspace.onDidSaveTextDocument(doc => {
+      if (doc.languageId === 'sql' || doc.fileName.endsWith('.sql')) {
+        this.analyze(doc, collection, 'save');
       }
     }, null, context.subscriptions);
 
     // Clear diagnostics when file is closed
     vscode.workspace.onDidCloseTextDocument(doc => {
       collection.delete(doc.uri);
-      this.interruptShown.delete(doc.uri.toString());
     }, null, context.subscriptions);
 
     // Analyze all already-open SQL documents
     for (const doc of vscode.workspace.textDocuments) {
-      if (doc.languageId === 'sql') {
-        this.analyze(doc, collection);
+      if (doc.languageId === 'sql' || doc.fileName.endsWith('.sql')) {
+        this.analyze(doc, collection, 'open');
       }
+    }
+  }
+
+  /**
+   * Gate for "execute" flow: shows modal warnings before the user runs destructive SQL.
+   * Called by extension.ts at the top of dbscope.analyzeBlastRadius command.
+   */
+  async promptDestructiveGate(document: vscode.TextDocument): Promise<void> {
+    const config = vscode.workspace.getConfiguration('dbscope');
+    if (!config.get<boolean>('diagnosticsEnabled', true)) { return; }
+    const text = document.getText();
+    const statements = splitSqlStatements(text);
+    const schema = await this.schemaState.getCurrentSchema();
+    for (const stmt of statements) {
+      const patternDiags = runPatternRules(stmt.sql, stmt.clauseMask, stmt.startOffset);
+      const schemaArr = runSchemaRules(stmt, schema);
+      const all = [...patternDiags, ...schemaArr];
+      await this.processModals(all, document, 'execute');
     }
   }
 
@@ -124,7 +94,8 @@ export class SqlDiagnosticProvider {
 
   private async analyze(
     document: vscode.TextDocument,
-    collection: vscode.DiagnosticCollection
+    collection: vscode.DiagnosticCollection,
+    trigger: 'edit' | 'open' | 'save' | 'execute'
   ): Promise<void> {
     const config = vscode.workspace.getConfiguration('dbscope');
     if (!config.get<boolean>('diagnosticsEnabled', true)) {
@@ -133,45 +104,64 @@ export class SqlDiagnosticProvider {
     }
 
     const text = document.getText();
-    const rawDiagnostics = this.runRules(text);
-    const vsDiagnostics = rawDiagnostics.map(d => this.toVsDiagnostic(document, d));
+    const statements = splitSqlStatements(text);
+    const schema = await this.schemaState.getCurrentSchema();
+    const allRaw: SqlDiagnostic[] = [];
 
-    collection.set(document.uri, vsDiagnostics);
+    for (const stmt of statements) {
+      const patternDiags = runPatternRules(stmt.sql, stmt.clauseMask, stmt.startOffset);
+      const schemaArr = runSchemaRules(stmt, schema);
+      allRaw.push(...patternDiags, ...schemaArr);
+    }
 
-    // Show interruption modal for critical operations (once per document per session)
-    const criticalRules = rawDiagnostics.filter(d => d.severity === 'error');
-    const docKey = document.uri.toString();
-    for (const diag of criticalRules) {
-      const interruptKey = `${docKey}:${diag.startOffset}`;
-      if (!this.interruptShown.has(interruptKey)) {
-        this.interruptShown.add(interruptKey);
-        this.showInterruptWarning(diag.message, diag.suggestion);
-      }
+    // Deduplicate by offset+code
+    const seen = new Set<string>();
+    const deduped = allRaw.filter(d => {
+      const key = `${d.startOffset}:${d.code ?? d.message}`;
+      if (seen.has(key)) { return false; }
+      seen.add(key);
+      return true;
+    });
+
+    collection.set(document.uri, deduped.map(d => this.toVsDiagnostic(document, d)));
+
+    // Show modals only on save or open (not every keystroke)
+    if (trigger === 'save' || trigger === 'open' || trigger === 'execute') {
+      await this.processModals(deduped, document, trigger);
     }
   }
 
   // ──────────────────────────────────────────────
-  // Rule Engine
+  // Modal processing (once per fingerprint per session)
   // ──────────────────────────────────────────────
 
-  private runRules(text: string): SqlDiagnostic[] {
-    const diagnostics: SqlDiagnostic[] = [];
-
-    for (const rule of DIAGNOSTIC_RULES) {
-      const regex = new RegExp(rule.pattern.source, rule.pattern.flags.replace('g', '') + 'g');
-      let match: RegExpExecArray | null;
-      while ((match = regex.exec(text)) !== null) {
-        diagnostics.push({
-          message: rule.message,
-          severity: rule.severity,
-          startOffset: match.index,
-          endOffset: match.index + match[0].length,
-          suggestion: rule.suggestion,
-        });
-      }
+  private async processModals(
+    diagnostics: SqlDiagnostic[],
+    document: vscode.TextDocument,
+    trigger: string
+  ): Promise<void> {
+    const docKey = document.uri.toString();
+    for (const diag of diagnostics) {
+      if (!diag.code || !MODAL_CODES.has(diag.code)) { continue; }
+      // Simple djb2 fingerprint over lowercased message + offset
+      const fingerprint = `${docKey}:${diag.code}:${diag.startOffset}`;
+      if (this.sessionAlerts.has(fingerprint)) { continue; }
+      this.sessionAlerts.add(fingerprint);
+      await this.showModalWarning(diag, trigger);
     }
+  }
 
-    return diagnostics;
+  private async showModalWarning(diag: SqlDiagnostic, _trigger: string): Promise<void> {
+    const detail = diag.suggestion ? `\n💡 ${diag.suggestion}` : '';
+    const choice = await vscode.window.showWarningMessage(
+      `⚠ DB-Scope: ${diag.message}`,
+      { modal: true, detail: detail || undefined },
+      'Analyze Impact',
+      'Dismiss'
+    );
+    if (choice === 'Analyze Impact') {
+      vscode.commands.executeCommand('dbscope.analyzeBlastRadius');
+    }
   }
 
   // ──────────────────────────────────────────────
@@ -192,33 +182,16 @@ export class SqlDiagnosticProvider {
 
     const vsDiag = new vscode.Diagnostic(range, message, this.toVsSeverity(diag.severity));
     vsDiag.source = 'DB-Scope';
-    vsDiag.code = 'db-scope-diagnostic';
+    if (diag.code) { vsDiag.code = diag.code; }
     return vsDiag;
   }
 
-  private toVsSeverity(sev: DiagnosticSeverity): vscode.DiagnosticSeverity {
+  private toVsSeverity(sev: SqlDiagnostic['severity']): vscode.DiagnosticSeverity {
     switch (sev) {
       case 'error': return vscode.DiagnosticSeverity.Error;
       case 'warning': return vscode.DiagnosticSeverity.Warning;
       case 'info': return vscode.DiagnosticSeverity.Information;
     }
-  }
-
-  // ──────────────────────────────────────────────
-  // Interrupt Warning Modal
-  // ──────────────────────────────────────────────
-
-  private showInterruptWarning(message: string, suggestion?: string): void {
-    const detail = suggestion ? `\n\n💡 Suggestion: ${suggestion}` : '';
-    vscode.window.showWarningMessage(
-      `⚠ DB-Scope Warning: ${message}${detail}`,
-      { modal: false },
-      'View Analysis'
-    ).then(selection => {
-      if (selection === 'View Analysis') {
-        vscode.commands.executeCommand('dbscope.analyzeBlastRadius');
-      }
-    });
   }
 
   // ──────────────────────────────────────────────
