@@ -239,6 +239,8 @@ const hoverAnalyzerStub = {
     documentationDrift: [],
     suggestions: ['Rename first, then drop'],
     rollbackSuggestions: [{ description: 'Re-add phone', sql: 'ALTER TABLE users ADD COLUMN phone VARCHAR;', safetyLevel: 'safe' }],
+    riskExplanation: "Critical data loss.",
+    confidence: { overall: { confidenceScore: 100, confidenceReason: "" }, schemaImpact: { confidenceScore: 100, confidenceReason: "" }, appDependencies: { confidenceScore: 100, confidenceReason: "" }, dataIntegrityRisks: { confidenceScore: 100, confidenceReason: "" }, documentationDrift: { confidenceScore: 100, confidenceReason: "" } },
     generatedAt: Date.now(),
   }),
 };
@@ -767,7 +769,9 @@ const mockResult: BlastRadiusResult = {
   affectedTables: ['users'],
   schemaImpact: { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
   appDependencies: [], dataIntegrityRisks: [], documentationDrift: [],
-  suggestions: [], rollbackSuggestions: [], generatedAt: Date.now(),
+  suggestions: [], rollbackSuggestions: [], riskExplanation: "Critical data loss.",
+  confidence: { overall: { confidenceScore: 100, confidenceReason: "" }, schemaImpact: { confidenceScore: 100, confidenceReason: "" }, appDependencies: { confidenceScore: 100, confidenceReason: "" }, dataIntegrityRisks: { confidenceScore: 100, confidenceReason: "" }, documentationDrift: { confidenceScore: 100, confidenceReason: "" } },
+  generatedAt: Date.now(),
 };
 
 // Use real BlastRadiusAnalyzer (not testable subclass) for file I/O
@@ -934,6 +938,8 @@ const criticalResult: BlastRadiusResult = {
   documentationDrift: [],
   suggestions: ['Rename first'],
   rollbackSuggestions: [{ description: 'Re-add phone', sql: 'ALTER TABLE users ADD COLUMN phone VARCHAR;', safetyLevel: 'safe' }],
+  riskExplanation: "Critical data loss.",
+  confidence: { overall: { confidenceScore: 100, confidenceReason: "" }, schemaImpact: { confidenceScore: 100, confidenceReason: "" }, appDependencies: { confidenceScore: 100, confidenceReason: "" }, dataIntegrityRisks: { confidenceScore: 100, confidenceReason: "" }, documentationDrift: { confidenceScore: 100, confidenceReason: "" } },
   generatedAt: Date.now(),
 };
 
@@ -941,7 +947,10 @@ const lowResult: BlastRadiusResult = {
   sql: 'SELECT * FROM users', riskScore: 1, riskLevel: 'low', affectedTables: ['users'],
   schemaImpact: { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
   appDependencies: [], dataIntegrityRisks: [], documentationDrift: [],
-  suggestions: [], rollbackSuggestions: [], generatedAt: Date.now(),
+  suggestions: [], rollbackSuggestions: [],
+  riskExplanation: "Low risk.",
+  confidence: { overall: { confidenceScore: 100, confidenceReason: "" }, schemaImpact: { confidenceScore: 100, confidenceReason: "" }, appDependencies: { confidenceScore: 100, confidenceReason: "" }, dataIntegrityRisks: { confidenceScore: 100, confidenceReason: "" }, documentationDrift: { confidenceScore: 100, confidenceReason: "" } },
+  generatedAt: Date.now(),
 };
 
 test('15-01  Hover contains risk score line', () => {
