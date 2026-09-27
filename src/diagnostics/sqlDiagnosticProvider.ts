@@ -62,7 +62,7 @@ const DIAGNOSTIC_RULES: DiagnosticRule[] = [
   {
     pattern: /\bSELECT\s+\*/i,
     message: 'SELECT * fetches all columns — can be slow and fragile.',
-    severity: 'information',
+    severity: 'info',
     suggestion: 'Specify only the columns you need for better performance and clarity.',
   },
   {

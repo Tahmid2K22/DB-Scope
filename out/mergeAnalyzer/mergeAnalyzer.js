@@ -182,6 +182,7 @@ class MergeAnalyzer {
             ...base,
             conflicts: enrichedConflicts,
             reconciledSql: enrichedSql,
+            bobResolutions: bobResult.resolutions,
         };
     }
     /**

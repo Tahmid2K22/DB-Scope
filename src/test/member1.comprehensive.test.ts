@@ -247,6 +247,7 @@ const hover = new T_Hover(hoverAnalyzerStub as unknown as BlastRadiusAnalyzer);
 // ════════════════════════════════════════════════════════════════════════════
 // SECTION 1 — sqlParser: parseSql / detectOperation / extractTables
 // ════════════════════════════════════════════════════════════════════════════
+(async () => {
 section('1  sqlParser — parseSql');
 
 await test('1-01  SELECT: operation=SELECT, isDestructive=false', () => {
@@ -1043,3 +1044,4 @@ if (failures.length > 0) {
 }
 console.log('═'.repeat(60) + '\n');
 if (failed > 0) { process.exit(1); }
+})();
