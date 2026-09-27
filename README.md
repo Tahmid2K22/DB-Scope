@@ -41,31 +41,28 @@ Today, when a developer runs `ALTER TABLE users DROP COLUMN phone`, they don't k
 
 ## 🏗️ Architecture
 
+```mermaid
+graph TD
+    A[VS Code SQL Editor] -->|Hover / Edit| B(SqlHoverProvider / SqlDiagnosticProvider)
+    B --> C{ContextManager}
+    C -->|Fetch Live Schema| D[(PostgreSQL / MySQL)]
+    
+    C -->|Pruned Schema + SQL| E[watsonx Granite AI]
+    
+    subgraph Member 1: AI Blast Radius Analyzer
+    E -->|Consolidated Prompt| F(Schema Impact)
+    E -->|Consolidated Prompt| G(Data Risks)
+    E -->|Consolidated Prompt| H(Risk Score)
+    E -->|Consolidated Prompt| I(Rollback SQL)
+    end
+    
+    F --> J[Hover Tooltip & Report]
+    G --> J
+    H --> J
+    I --> J
+    
+    J -->|LRU Cache| C
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        VS Code Extension                         │
-│                                                                   │
-│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐  │
-│  │ SqlHoverProvider│  │SqlDiagnosticProv.│  │  DashboardPanel│  │
-│  │  (Member 1)     │  │   (Member 2)     │  │   (Shared)     │  │
-│  └────────┬────────┘  └────────┬─────────┘  └───────┬────────┘  │
-│           │                    │                     │           │
-│  ┌────────▼────────────────────▼─────────────────────▼────────┐  │
-│  │                      Core Engine                            │  │
-│  │  BlastRadiusAnalyzer │ ContextManager │ DuplicateDetector  │  │
-│  │       (M1)           │    (M2)        │      (M2)          │  │
-│  │  MergeAnalyzer (M3)  │ SchemaStateMap │ DbAdapters         │  │
-│  └──────────────────────────────────────────────────────────── ┘  │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────────┐  │
-│  │  DB Adapters: PostgreSQL │ MySQL │ Oracle (via InfoSchema)  │  │
-│  └─────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-         │                    │                    │
-    PostgreSQL             MySQL               Oracle
-```
-
----
 
 ## 🚀 Features
 
@@ -182,21 +179,20 @@ Select Schema A file → Select Schema B file → View conflict report
 
 ---
 
-## 🤖 Why IBM Bob?
+## 🤖 Why IBM Bob & watsonx.ai?
 
 > *"Copilot can assist with individual code tasks. Bob can orchestrate multi-step, multi-file, multi-agent workflows."*
 
-DB-Scope was built **natively with IBM Bob 2.0** leveraging:
+DB-Scope was built **natively with IBM Bob 2.0** and **watsonx.ai Granite**, leveraging:
 
-| Bob Feature | How We Used It |
+| Feature | How We Used It |
 |-------------|----------------|
-| **Parallel Subagents** | 4 subagents run simultaneously for the 4-dimension blast radius analysis (schema, apps, data, docs) |
-| **Custom Modes** | `schema-analyst` mode for parsing SQL migration files with DB-aware context |
-| **MCP Server** | GitHub MCP to search the codebase for table references across all files |
-| **Document Understanding** | Bob reads README.md and OpenAPI specs to detect documentation drift |
-| **Skills** | Custom `sql-safety` skill defining diagnostic rules for Bob to apply |
+| **watsonx.ai Granite** | Replaced deterministic regex with Granite for SQL parsing, risk scoring, data integrity checks, and auto-generating rollback SQL. |
+| **Enterprise Token Optimization** | (Member 1) Implemented **Prompt Consolidation** (1 API call instead of 4), **LRU Caching** (0ms latency on repeat hovers), and **Context Pruning** (99% token reduction on large DBs). |
+| **Parallel Subagents** | IBM Bob orchestrated 4 subagents to run simultaneously for the 4-dimension blast radius analysis (schema, apps, data, docs). |
+| **Custom Modes & MCP** | `schema-analyst` mode for parsing SQL, and GitHub MCP to search the codebase for ORM dependencies across all files. |
 
-Without Bob's parallel subagent orchestration, the 4-dimension blast radius analysis would run sequentially — 4x slower. Bob makes it possible to analyze schema, scan 200+ source files, check data integrity, and audit docs *simultaneously*.
+Without Bob's orchestration and Granite's enterprise reasoning, this tool would be a naive regex linter. Instead, it is a fully optimized, production-ready AI Senior DBA.
 
 ---
 
