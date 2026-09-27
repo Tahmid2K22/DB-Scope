@@ -5,3 +5,4 @@ BOB_INSTRUCTIONS.md
 *.log
 .DS_Store
 *.vsix
+.vscode/settings.json
