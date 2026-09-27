@@ -101,6 +101,16 @@ function extractJson(raw) {
     if (!raw || raw.trim().length === 0) {
         return null;
     }
+    // Check if raw is a Bob CLI result wrapper {"type":"result", "last_message":"..."}
+    try {
+        const wrapped = JSON.parse(raw.trim());
+        if (wrapped && typeof wrapped === 'object' && typeof wrapped.last_message === 'string') {
+            raw = wrapped.last_message;
+        }
+    }
+    catch {
+        // proceed with raw text
+    }
     // Strip markdown code fences if present
     let text = raw.replace(/```(?:json)?\s*/gi, '').replace(/```\s*/g, '');
     // Find the outermost JSON array: first '[' to last ']'
@@ -127,8 +137,10 @@ function extractJson(raw) {
 /** Returns true if `bob` is on PATH without throwing. */
 async function isBobAvailable() {
     return new Promise(resolve => {
-        // `bob --version` exits quickly; use it as a health-check
-        const probe = (0, child_process_1.spawn)('bob', ['--version'], { stdio: 'ignore', shell: false });
+        const isWin = process.platform === 'win32';
+        const probe = isWin
+            ? (0, child_process_1.spawn)('cmd.exe', ['/c', 'bob', '--version'], { stdio: 'ignore', shell: false })
+            : (0, child_process_1.spawn)('bob', ['--version'], { stdio: 'ignore', shell: false });
         probe.on('error', () => resolve(false));
         probe.on('close', code => resolve(code === 0));
     });
@@ -148,11 +160,16 @@ async function invokeBobForMergeAnalysis(prompt, workspaceRoot) {
         };
     }
     return new Promise(resolve => {
+        const isWin = process.platform === 'win32';
+        const cmd = isWin ? 'cmd.exe' : 'bob';
+        const args = isWin
+            ? ['/c', 'bob', 'run', '--accept-license', '--trust', '-f', 'json', '--max-turns', '10', '--max-cost', '0.50']
+            : ['run', '--accept-license', '--trust', '-f', 'json', '--max-turns', '10', '--max-cost', '0.50'];
         // Spawn bob with safety limits; prompt comes via stdin only
-        const child = (0, child_process_1.spawn)('bob', ['run', '--output-format', 'text', '--max-turns', '10', '--max-cost', '0.50'], {
+        const child = (0, child_process_1.spawn)(cmd, args, {
             cwd: workspaceRoot,
             stdio: ['pipe', 'pipe', 'pipe'],
-            shell: false, // never use shell — avoids injection via schema content
+            shell: false,
             env: { ...process.env },
         });
         let stdout = '';

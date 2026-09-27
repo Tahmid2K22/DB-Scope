@@ -1,10 +1,15 @@
 // src/ai/watsonxClient.ts
-// Thin wrapper around the IBM watsonx.ai Chat API (ibm/granite-3-3-8b-instruct).
-// All AI calls in DB-Scope go through this one module so credentials are
-// configured once and token refresh is handled transparently.
+// Dual AI engine client for DB-Scope:
+// 1. IBM watsonx.ai Chat API (ibm/granite-3-3-8b-instruct) when credentials are provided.
+// 2. IBM Bob Shell CLI (`bob run`) as a seamless fallback powered by BOB_API_KEY.
+// All AI calls in DB-Scope go through this one module so credentials and fallbacks
+// are handled transparently across the extension.
 
 import * as vscode from 'vscode';
 import fetch from 'node-fetch';
+import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Logger } from '../utils/logger';
 
 const IAM_TOKEN_URL = 'https://iam.cloud.ibm.com/identity/token';
@@ -25,15 +30,43 @@ export class WatsonxClient {
   }
 
   private get apiKey(): string {
-    return this.config.get<string>('watsonxApiKey', '');
+    return this.config.get<string>('watsonxApiKey', '') || process.env.WATSONX_API_KEY || '';
   }
 
   private get projectId(): string {
-    return this.config.get<string>('watsonxProjectId', '');
+    return this.config.get<string>('watsonxProjectId', '') || process.env.WATSONX_PROJECT_ID || '';
   }
 
   private get baseUrl(): string {
-    return this.config.get<string>('watsonxUrl', 'https://us-south.ml.cloud.ibm.com').replace(/\/$/, '');
+    return (this.config.get<string>('watsonxUrl', 'https://us-south.ml.cloud.ibm.com') || 'https://us-south.ml.cloud.ibm.com').replace(/\/$/, '');
+  }
+
+  private getBobApiKey(): string {
+    const configKey = this.config.get<string>('bobApiKey', '');
+    if (configKey) { return configKey; }
+
+    if (process.env.BOB_API_KEY) {
+      return process.env.BOB_API_KEY;
+    }
+
+    // Check workspace .env files
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders) {
+      for (const folder of folders) {
+        const envPath = path.join(folder.uri.fsPath, '.env');
+        if (fs.existsSync(envPath)) {
+          try {
+            const raw = fs.readFileSync(envPath, 'utf8');
+            const match = raw.match(/^\s*BOB_API_KEY\s*=\s*(.+?)\s*$/m);
+            if (match) {
+              return match[1].replace(/["']/g, '').trim();
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }
+
+    return '';
   }
 
   // ── IAM token exchange with 50-minute cache ────────────────────────────────
@@ -72,15 +105,9 @@ export class WatsonxClient {
     return this.tokenCache.token;
   }
 
-  // ── Main call ──────────────────────────────────────────────────────────────
+  // ── IBM watsonx.ai Call ───────────────────────────────────────────────────
 
-  /**
-   * Send a system + user message to Granite and return the raw text response.
-   * @param systemPrompt  Instruction context for the model
-   * @param userMessage   The actual content / data to analyse
-   * @param maxTokens     Maximum tokens to generate (default 512)
-   */
-  async ask(systemPrompt: string, userMessage: string, maxTokens = 512): Promise<string> {
+  private async askWatsonx(systemPrompt: string, userMessage: string, maxTokens = 512): Promise<string> {
     const projectId = this.projectId;
     if (!projectId) {
       throw new Error(
@@ -121,8 +148,102 @@ export class WatsonxClient {
 
     const data = await resp.json() as { choices: { message: { content: string } }[] };
     const content = data?.choices?.[0]?.message?.content ?? '';
-    this.logger.info(`WatsonxClient: received ${content.length} chars`);
+    this.logger.info(`WatsonxClient: received ${content.length} chars from watsonx.ai`);
     return content;
+  }
+
+  // ── IBM Bob Shell Fallback ────────────────────────────────────────────────
+
+  private async askBob(systemPrompt: string, userMessage: string): Promise<string> {
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? 'cmd.exe' : 'bob';
+    const args = isWin
+      ? ['/c', 'bob', 'run', '--accept-license', '--trust', '-f', 'json', '--max-turns', '1']
+      : ['run', '--accept-license', '--trust', '-f', 'json', '--max-turns', '1'];
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    const cwd = workspaceFolders && workspaceFolders.length > 0
+      ? workspaceFolders[0].uri.fsPath
+      : process.cwd();
+
+    const bobApiKey = this.getBobApiKey();
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...(bobApiKey ? { BOB_API_KEY: bobApiKey } : {}),
+    };
+
+    const prompt = `${systemPrompt}\n\nTask:\n${userMessage}\n\nIMPORTANT: Return ONLY the raw output or JSON specified above. No markdown fences outside the JSON.`;
+
+    this.logger.info(`WatsonxClient: delegating query to IBM Bob Shell CLI in ${cwd}`);
+
+    return new Promise((resolve, reject) => {
+      const child = spawn(cmd, args, {
+        cwd,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: false,
+        env,
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
+      child.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+      child.stdin.write(prompt, 'utf8');
+      child.stdin.end();
+
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        reject(new Error('IBM Bob Shell timed out after 60s'));
+      }, 60_000);
+
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code !== 0 && stdout.trim().length === 0) {
+          reject(new Error(`IBM Bob Shell exited with code ${code}. ${stderr.slice(0, 300)}`));
+          return;
+        }
+
+        const raw = stdout.trim();
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && typeof parsed.last_message === 'string') {
+            this.logger.info(`WatsonxClient: received response from IBM Bob (${parsed.last_message.length} chars)`);
+            resolve(parsed.last_message);
+            return;
+          }
+        } catch {
+          // stdout may contain non-JSON preamble
+        }
+
+        this.logger.info(`WatsonxClient: received response from IBM Bob (${raw.length} chars)`);
+        resolve(raw);
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  // ── Main Entry Point ───────────────────────────────────────────────────────
+
+  /**
+   * Send a system + user message to IBM AI and return the raw text response.
+   * Prefers watsonx.ai Granite if configured; seamlessly falls back to IBM Bob Shell.
+   */
+  async ask(systemPrompt: string, userMessage: string, maxTokens = 512): Promise<string> {
+    if (this.apiKey && this.projectId) {
+      try {
+        return await this.askWatsonx(systemPrompt, userMessage, maxTokens);
+      } catch (err) {
+        this.logger.warn(`WatsonxClient: watsonx.ai failed (${err}), falling back to IBM Bob Shell...`);
+      }
+    }
+
+    return await this.askBob(systemPrompt, userMessage);
   }
 }
 
