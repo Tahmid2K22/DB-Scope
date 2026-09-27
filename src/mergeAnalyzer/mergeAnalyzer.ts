@@ -23,6 +23,7 @@ import {
   conflictId,
   BobConflictResolution,
 } from './bobBridge';
+import { BobResolutionSummary } from '../core/types';
 
 export class MergeAnalyzer {
   private readonly logger = Logger.getInstance();
@@ -191,6 +192,7 @@ export class MergeAnalyzer {
       ...base,
       conflicts: enrichedConflicts,
       reconciledSql: enrichedSql,
+      bobResolutions: bobResult.resolutions as BobResolutionSummary[],
     };
   }
 

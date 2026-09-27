@@ -7,6 +7,7 @@ import * as path from 'path';
 import {
   BlastRadiusResult,
   MergeAnalysisResult,
+  BobResolutionSummary,
   DuplicateGroup,
   SchemaSnapshot,
 } from '../core/types';
@@ -120,6 +121,20 @@ export class DashboardPanel {
     .score-fill { height: 8px; border-radius: 4px; }
     ul { margin: 6px 0; padding-left: 20px; }
     li { margin-bottom: 4px; }
+    .bob-banner { background: #0e3a5c; border: 1px solid #1a6a9a; border-radius: 4px; padding: 10px 14px; margin-bottom: 16px; color: #7dd3fc; font-size: 0.9em; }
+    .bob-banner strong { color: #bae6fd; }
+    .confidence-pill { display: inline-block; background: #1e40af; color: #bfdbfe; border-radius: 10px; padding: 1px 8px; font-size: 0.78em; font-weight: bold; margin-left: 6px; vertical-align: middle; }
+    .conflict-card { background: var(--vscode-sideBar-background); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 10px 14px; margin-bottom: 10px; }
+    .conflict-card .meta { font-size: 0.82em; color: var(--vscode-descriptionForeground, #888); margin-bottom: 6px; }
+    .conflict-card .suggestion { margin: 6px 0 4px; }
+    .files-list { margin: 4px 0 0 0; padding-left: 18px; font-size: 0.84em; }
+    .files-list li { margin-bottom: 2px; }
+    .files-list code { font-size: 0.95em; }
+    .migration-steps { margin: 6px 0 0 0; padding-left: 20px; font-size: 0.84em; }
+    .migration-steps li { margin-bottom: 2px; }
+    .risks-list { margin: 4px 0 0 0; padding-left: 18px; font-size: 0.84em; color: #f87171; }
+    .risks-list li::marker { content: "⚠ "; }
+    .section-label { font-size: 0.78em; font-weight: bold; text-transform: uppercase; opacity: 0.6; margin: 6px 0 2px; letter-spacing: 0.04em; }
   </style>
 </head>
 <body>
@@ -180,25 +195,116 @@ ${rollbacks ? `<h2>↩ Rollback SQL</h2>
   }
 
   private mergeHtml(r: MergeAnalysisResult): string {
-    const conflictRows = r.conflicts.map(c => `
-<tr>
-  <td><span class="tag">${this.esc(c.table)}</span>${c.column ? `.<code>${this.esc(c.column)}</code>` : ''}</td>
-  <td><span class="badge ${c.conflictType === 'type_mismatch' ? 'high' : 'medium'}">${this.esc(c.conflictType)}</span></td>
-  <td class="muted">${this.esc(c.sourceA)}</td>
-  <td class="muted">${this.esc(c.sourceB)}</td>
-  <td>${this.esc(c.suggestion)}</td>
-</tr>`).join('');
+    // Build a lookup map: conflictId key → BobResolutionSummary
+    const bobMap = new Map<string, BobResolutionSummary>();
+    for (const res of (r.bobResolutions ?? [])) {
+      bobMap.set(res.conflictId, res);
+    }
+
+    const bobEnriched = bobMap.size > 0;
+
+    // Severity color per conflict type
+    const severityFor = (t: string): string => {
+      switch (t) {
+        case 'missing_table':    return 'high';
+        case 'type_mismatch':    return 'high';
+        case 'name_conflict':    return 'medium';
+        case 'missing_column':   return 'medium';
+        case 'nullable_difference': return 'low';
+        default:                 return 'medium';
+      }
+    };
+
+    // Conflict type breakdown for header
+    const typeCounts: Record<string, number> = {};
+    for (const c of r.conflicts) {
+      typeCounts[c.conflictType] = (typeCounts[c.conflictType] ?? 0) + 1;
+    }
+    const typeBreakdown = Object.entries(typeCounts)
+      .map(([t, n]) => `<span class="badge ${severityFor(t)}" style="margin-right:4px">${n} ${this.esc(t)}</span>`)
+      .join(' ');
+
+    // Bob banner
+    const bobBanner = bobEnriched ? `
+<div class="bob-banner">
+  🤖 <strong>IBM Bob AI-Enhanced</strong> — ${bobMap.size} conflict${bobMap.size !== 1 ? 's' : ''} analyzed by IBM Bob Shell.
+  Confidence scores, affected files, and migration steps are sourced from Bob's repository-level analysis.
+</div>` : '';
+
+    // Per-conflict cards
+    const conflictId = (c: { conflictType: string; table: string; column?: string }) =>
+      c.column ? `${c.conflictType}::${c.table}::${c.column}` : `${c.conflictType}::${c.table}`;
+
+    const conflictCards = r.conflicts.map(c => {
+      const id = conflictId(c);
+      const bob = bobMap.get(id);
+      const severityClass = severityFor(c.conflictType);
+
+      // Confidence pill
+      const confidencePill = bob
+        ? `<span class="confidence-pill">${Math.round(bob.confidence * 100)}% confidence</span>`
+        : '';
+
+      // Resolution badge from Bob
+      const resolutionBadge = bob
+        ? `<span class="tag" style="margin-left:4px">${this.esc(bob.resolution)}</span>`
+        : '';
+
+      // Affected files
+      const files = bob?.affectedFiles ?? [];
+      const filesHtml = files.length > 0 ? `
+<div class="section-label">Affected Files</div>
+<ul class="files-list">
+  ${files.slice(0, 5).map(f => `<li><code>${this.esc(f.path)}</code> <span style="opacity:0.6">— ${this.esc(f.reason)}</span></li>`).join('')}
+  ${files.length > 5 ? `<li style="opacity:0.6">…and ${files.length - 5} more</li>` : ''}
+</ul>` : '';
+
+      // Migration plan
+      const plan = bob?.migrationPlan ?? [];
+      const planHtml = plan.length > 0 ? `
+<div class="section-label">Migration Plan</div>
+<ol class="migration-steps">
+  ${plan.map(step => `<li>${this.esc(step)}</li>`).join('')}
+</ol>` : '';
+
+      // Risks
+      const risks = bob?.risks ?? [];
+      const risksHtml = risks.length > 0 ? `
+<div class="section-label">Risks</div>
+<ul class="risks-list">
+  ${risks.map(risk => `<li>${this.esc(risk)}</li>`).join('')}
+</ul>` : '';
+
+      return `
+<div class="conflict-card">
+  <div class="meta">
+    <span class="tag">${this.esc(c.table)}</span>${c.column ? `.<code>${this.esc(c.column)}</code>` : ''}
+    &nbsp;
+    <span class="badge ${severityClass}">${this.esc(c.conflictType)}</span>${confidencePill}${resolutionBadge}
+  </div>
+  <div style="font-size:0.85em;opacity:0.75;margin-bottom:4px">
+    <strong>A:</strong> ${this.esc(c.sourceA)} &nbsp;·&nbsp; <strong>B:</strong> ${this.esc(c.sourceB)}
+  </div>
+  <div class="suggestion">💡 ${this.esc(c.suggestion)}</div>
+  ${filesHtml}${planHtml}${risksHtml}
+</div>`;
+    }).join('');
 
     const body = `
 <h1>🔀 Database Merge Conflict Report</h1>
-<p><strong>Schema A:</strong> ${this.esc(r.schemaA.databaseName)} &nbsp;|&nbsp; <strong>Schema B:</strong> ${this.esc(r.schemaB.databaseName)}</p>
-<p><strong>Conflicts found:</strong> <span class="badge ${r.conflicts.length > 5 ? 'high' : r.conflicts.length > 0 ? 'medium' : 'low'}">${r.conflicts.length}</span></p>
+${bobBanner}
+<p>
+  <strong>Schema A:</strong> ${this.esc(r.schemaA.databaseName)}
+  &nbsp;|&nbsp;
+  <strong>Schema B:</strong> ${this.esc(r.schemaB.databaseName)}
+</p>
+<p>
+  <strong>Conflicts found:</strong>
+  <span class="badge ${r.conflicts.length > 5 ? 'high' : r.conflicts.length > 0 ? 'medium' : 'low'}">${r.conflicts.length}</span>
+  &nbsp; ${typeBreakdown}
+</p>
 
-${conflictRows ? `<h2>Conflict Details</h2>
-<table>
-  <thead><tr><th>Table / Column</th><th>Type</th><th>In A</th><th>In B</th><th>Suggestion</th></tr></thead>
-  <tbody>${conflictRows}</tbody>
-</table>` : '<p>✅ No conflicts detected — schemas are compatible!</p>'}
+${conflictCards || '<p>✅ No conflicts detected — schemas are compatible!</p>'}
 
 <h2>Reconciliation SQL</h2>
 <pre>${this.esc(r.reconciledSql)}</pre>
