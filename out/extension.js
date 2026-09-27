@@ -45,6 +45,7 @@ const contextManager_1 = require("./contextManager/contextManager");
 const duplicateDetector_1 = require("./duplicateDetector/duplicateDetector");
 const mergeAnalyzer_1 = require("./mergeAnalyzer/mergeAnalyzer");
 const dashboardPanel_1 = require("./dashboard/dashboardPanel");
+const dashboardViewProvider_1 = require("./dashboard/dashboardViewProvider");
 const schemaStateMap_1 = require("./core/schemaStateMap");
 const logger_1 = require("./utils/logger");
 const sqlCodeActionProvider_1 = require("./diagnostics/sqlCodeActionProvider");
@@ -81,6 +82,8 @@ async function activate(context) {
     if (config.get('autoFetchContext')) {
         contextManager.fetchFromCodebase().catch(err => logger.warn(`Auto context fetch failed: ${err.message}`));
     }
+    // Sidebar Overview: WebviewView so the sidebar shows content on activation (no command needed)
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(dashboardViewProvider_1.DashboardViewProvider.viewId, new dashboardViewProvider_1.DashboardViewProvider()));
     // --- Dashboard message handler ---
     // Handles bidirectional communication between the webview dashboard and the extension.
     const pushSchemaStats = async () => {
@@ -115,12 +118,25 @@ async function activate(context) {
     };
     // Register commands
     context.subscriptions.push(vscode.commands.registerCommand('dbscope.analyzeBlastRadius', async () => {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            vscode.window.showWarningMessage('DB-Scope: No active editor.');
-            return;
+        let document = vscode.window.activeTextEditor?.document;
+        // No active editor (e.g. focus was on Command Palette / sidebar) —
+        // let the user pick a SQL file from the workspace.
+        if (!document) {
+            const picked = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                filters: { 'SQL / Source files': ['sql', 'ts', 'js', 'py', 'java'] },
+                openLabel: 'Analyze this file',
+            });
+            if (!picked || picked.length === 0) {
+                return;
+            }
+            document = await vscode.workspace.openTextDocument(picked[0]);
+            await vscode.window.showTextDocument(document);
         }
-        const sql = editor.document.getText(editor.selection) || editor.document.getText();
+        const editor = vscode.window.activeTextEditor;
+        const sql = editor
+            ? (editor.document.getText(editor.selection.isEmpty ? undefined : editor.selection) || document.getText())
+            : document.getText();
         const result = await blastRadiusAnalyzer.analyze(sql);
         openDashboard({ type: 'blastRadius', data: result });
     }), vscode.commands.registerCommand('dbscope.detectDuplicates', async () => {
@@ -149,12 +165,23 @@ async function activate(context) {
     }), 
     // Step 8: Export last analysis result to a JSON file
     vscode.commands.registerCommand('dbscope.exportAnalysis', async () => {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            vscode.window.showWarningMessage('DB-Scope: No active editor to analyze.');
-            return;
+        let document = vscode.window.activeTextEditor?.document;
+        if (!document) {
+            const picked = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                filters: { 'SQL / Source files': ['sql', 'ts', 'js', 'py', 'java'] },
+                openLabel: 'Analyze this file',
+            });
+            if (!picked || picked.length === 0) {
+                return;
+            }
+            document = await vscode.workspace.openTextDocument(picked[0]);
+            await vscode.window.showTextDocument(document);
         }
-        const sql = editor.document.getText(editor.selection) || editor.document.getText();
+        const editor = vscode.window.activeTextEditor;
+        const sql = editor
+            ? (editor.document.getText(editor.selection.isEmpty ? undefined : editor.selection) || document.getText())
+            : document.getText();
         const result = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Running impact analysis...' }, () => blastRadiusAnalyzer.analyze(sql));
         const saveUri = await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.file(`blast-radius-${Date.now()}.json`),

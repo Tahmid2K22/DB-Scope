@@ -400,7 +400,7 @@ export function runPatternRules(
   sql: string,
   clauseMask: string,
   baseOffset: number,
-  skipIfHasWhere = false
+  _skipIfHasWhere = false
 ): SqlDiagnostic[] {
   const diagnostics: SqlDiagnostic[] = [];
 

@@ -90,9 +90,10 @@ class BlastRadiusAnalyzer {
                 prunedSchema[tableName] = t;
         }
         const cacheKey = sql + "||" + JSON.stringify(prunedSchema);
-        if (this.analysisCache.has(cacheKey)) {
+        const cachedResult = this.analysisCache.get(cacheKey);
+        if (cachedResult) {
             this.logger.info(`BlastRadius: cache hit for SQL`);
-            return this.analysisCache.get(cacheKey);
+            return cachedResult;
         }
         // Dimensions 2 and 4 run in parallel
         const [appDepsResult, docDrift] = await Promise.all([
@@ -126,7 +127,9 @@ class BlastRadiusAnalyzer {
         this.analysisCache.set(cacheKey, result);
         if (this.analysisCache.size > 50) {
             const firstKey = this.analysisCache.keys().next().value;
-            this.analysisCache.delete(firstKey);
+            if (firstKey !== undefined) {
+                this.analysisCache.delete(firstKey);
+            }
         }
         return result;
     }
@@ -184,18 +187,20 @@ Table sizes: ${rowInfo || 'none available'}`;
             const d = JSON.parse(json);
             return {
                 schemaImpact: {
-                    breakingChanges: d.schemaImpact?.breakingChanges || [],
-                    nonBreakingChanges: d.schemaImpact?.nonBreakingChanges || [],
-                    cascadeEffects: d.schemaImpact?.cascadeEffects || []
+                    breakingChanges: d.schemaImpact?.breakingChanges ?? [],
+                    nonBreakingChanges: d.schemaImpact?.nonBreakingChanges ?? [],
+                    cascadeEffects: d.schemaImpact?.cascadeEffects ?? []
                 },
-                dataRisks: (d.dataRisks || []).map((r) => ({
+                dataRisks: (d.dataRisks ?? []).map((r) => ({
                     description: r.description,
                     severity: this.normalizeRiskLevel(r.severity)
                 })),
-                rollbacks: (d.rollbacks || []).map((r) => ({
+                rollbacks: (d.rollbacks ?? []).map((r) => ({
                     description: r.description,
                     sql: r.sql,
-                    safetyLevel: ['safe', 'manual_review', 'destructive'].includes(r.safetyLevel) ? r.safetyLevel : 'manual_review'
+                    safetyLevel: (['safe', 'manual_review', 'destructive'].includes(r.safetyLevel)
+                        ? r.safetyLevel
+                        : 'manual_review')
                 })),
                 score: Math.min(Math.max(Math.round(d.score ?? 5), 1), 10),
                 explanation: d.explanation ?? '',
@@ -211,7 +216,7 @@ Table sizes: ${rowInfo || 'none available'}`;
         }
         catch (err) {
             this.logger.warn(`Consolidated AI error: ${err}`);
-            let score = Math.min(deps.filter(d => d.severity === 'critical').length, 2);
+            const score = Math.min(deps.filter(d => d.severity === 'critical').length, 2);
             return {
                 schemaImpact: { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
                 dataRisks: [],

@@ -117,7 +117,7 @@ function test(name, fn) {
         }
     }
     catch (err) {
-        console.error(`  ❌ ${name}\n     ${err.message}`);
+        console.error(`  ❌ ${name}\n     ${err instanceof Error ? err.message : String(err)}`);
         failed++;
     }
 }

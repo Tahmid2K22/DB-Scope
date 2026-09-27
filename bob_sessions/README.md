@@ -5,15 +5,15 @@ This folder contains IBM Bob IDE task session summary screenshots as **mandatory
 ## Screenshot Naming Convention
 
 ```
-dbscope_task<NN>_<short_description>.png
+astrochari_task<NN>summary.png
 ```
 
 **Examples:**
-- `dbscope_task01_blast_radius_analysis.png`
-- `dbscope_task02_parallel_subagents_schema_scan.png`
-- `dbscope_task03_merge_analyzer_mcp_github.png`
-- `dbscope_task04_duplicate_detector_custom_mode.png`
-- `dbscope_task05_bobcoin_consumption_summary.png`
+- `astrochari_task01summary.png`
+- `astrochari_task02summary.png`
+- `astrochari_task03summary.png`
+- `astrochari_task04summary.png`
+- `astrochari_task05summary.png`
 
 ## What Each Screenshot Should Show
 

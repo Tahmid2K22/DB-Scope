@@ -329,7 +329,7 @@ class OracleAdapter implements DbAdapter {
     };
   }
 
-  async extractTablesSchema(tableNames: string[]): Promise<Record<string, TableDefinition>> {
+  async extractTablesSchema(_tableNames: string[]): Promise<Record<string, TableDefinition>> {
     this.logger.warn('OracleAdapter: extractTablesSchema stub');
     return {};
   }

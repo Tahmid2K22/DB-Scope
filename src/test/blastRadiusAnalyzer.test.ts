@@ -13,6 +13,7 @@ import { parseSql, parseSqlAI } from '../utils/sqlParser';
 import { TableDefinition, DatabaseSchema } from '../core/types';
 import { BlastRadiusAnalyzer } from '../blastRadius/blastRadiusAnalyzer';
 import { SchemaStateMap } from '../core/schemaStateMap';
+import { WatsonxClient } from '../ai/watsonxClient';
 
 // ─── StubWatsonxClient ────────────────────────────────────────────────────────
 // Returns pre-baked JSON strings so tests run offline with no API credentials.
@@ -87,8 +88,8 @@ function test(name: string, fn: () => void | Promise<void>): void {
       console.log(`  ✅ ${name}`);
       passed++;
     }
-  } catch (err: any) {
-    console.error(`  ❌ ${name}\n     ${err.message}`);
+  } catch (err: unknown) {
+    console.error(`  ❌ ${name}\n     ${err instanceof Error ? err.message : String(err)}`);
     failed++;
   }
 }
@@ -177,7 +178,7 @@ test('analyze(): AI schema impact — breaking changes returned from Granite', a
       confidenceReason:   'Full schema loaded for users table',
     }),
   });
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('ALTER TABLE users DROP COLUMN phone');
   assert.ok(result.schemaImpact.breakingChanges.length >= 1,
     'Expected at least 1 breaking change from Granite');
@@ -198,7 +199,7 @@ test('analyze(): AI data risks — critical risk for DELETE without WHERE', asyn
       confidenceReason: 'Row count known but DB version unknown',
     }),
   });
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('DELETE FROM orders');
   assert.ok(result.dataIntegrityRisks.length >= 1);
   assert.ok(result.dataIntegrityRisks.some(r => r.severity === 'critical'),
@@ -209,7 +210,7 @@ test('analyze(): AI data risks — critical risk for DELETE without WHERE', asyn
 
 test('analyze(): AI risk score + explanation populated from Granite', async () => {
   const stub = new StubWatsonxClient();  // default stub returns score=5, explanation='stub explanation'
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('ALTER TABLE orders DROP COLUMN user_id');
   assert.ok(result.riskScore >= 1 && result.riskScore <= 10,
     `Risk score out of range: ${result.riskScore}`);
@@ -221,7 +222,7 @@ test('analyze(): AI risk score + explanation populated from Granite', async () =
 
 test('analyze(): confidence object has all 5 dimensions populated', async () => {
   const stub = new StubWatsonxClient();
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('DROP TABLE users');
   const conf     = result.confidence;
   assert.ok(conf,                      'confidence should be present');
@@ -247,7 +248,7 @@ test('analyze(): per-dimension confidenceScore comes from Granite response', asy
       },
     }),
   });
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('DROP TABLE users');
   assert.strictEqual(result.confidence.schemaImpact.confidenceScore, 90,
     `Expected schemaImpact confidenceScore=90, got ${result.confidence.schemaImpact.confidenceScore}`);
@@ -279,7 +280,7 @@ test('analyze(): arithmetic fallback activates when AI throws on score call', as
       return JSON.stringify({ results: [] });
     },
   };
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, partialStub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, partialStub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('DROP TABLE users');
   // Should still return a valid result with riskScore >= 1
   assert.ok(result.riskScore >= 1, `Expected riskScore >= 1, got ${result.riskScore}`);
@@ -300,7 +301,7 @@ test('analyze(): AI rollback contains AI-written SQL from Granite', async () => 
       }],
     }),
   });
-  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as any);
+  const analyzer = new BlastRadiusAnalyzer(stubSchema as unknown as SchemaStateMap, stub as unknown as WatsonxClient);
   const result   = await analyzer.analyze('ALTER TABLE users DROP COLUMN phone');
   assert.ok(result.rollbackSuggestions.length >= 1);
   assert.ok(result.rollbackSuggestions.some(r => r.sql.toLowerCase().includes('phone')),

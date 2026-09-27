@@ -80,9 +80,10 @@ export class BlastRadiusAnalyzer {
     }
 
     const cacheKey = sql + "||" + JSON.stringify(prunedSchema);
-    if (this.analysisCache.has(cacheKey)) {
+    const cachedResult = this.analysisCache.get(cacheKey);
+    if (cachedResult) {
       this.logger.info(`BlastRadius: cache hit for SQL`);
-      return this.analysisCache.get(cacheKey)!;
+      return cachedResult;
     }
 
     // Dimensions 2 and 4 run in parallel
@@ -129,7 +130,9 @@ export class BlastRadiusAnalyzer {
     this.analysisCache.set(cacheKey, result);
     if (this.analysisCache.size > 50) {
       const firstKey = this.analysisCache.keys().next().value;
-      this.analysisCache.delete(firstKey!);
+      if (firstKey !== undefined) {
+        this.analysisCache.delete(firstKey);
+      }
     }
 
     return result;
@@ -212,22 +215,32 @@ Table sizes: ${rowInfo || 'none available'}`;
     try {
       const raw  = await this.ai.ask(system, user, 2048);
       const json = this.extractJson(raw);
-      const d    = JSON.parse(json);
+      const d    = JSON.parse(json) as {
+        schemaImpact?: { breakingChanges?: string[]; nonBreakingChanges?: string[]; cascadeEffects?: string[] };
+        dataRisks?: { description: string; severity: string }[];
+        rollbacks?: { description: string; sql: string; safetyLevel: string }[];
+        score?: number;
+        explanation?: string;
+        suggestions?: string[];
+        confidence?: Partial<Record<'overall' | 'schemaImpact' | 'appDependencies' | 'dataIntegrityRisks' | 'documentationDrift', DimensionConfidence>>;
+      };
 
       return {
         schemaImpact: {
-          breakingChanges: d.schemaImpact?.breakingChanges || [],
-          nonBreakingChanges: d.schemaImpact?.nonBreakingChanges || [],
-          cascadeEffects: d.schemaImpact?.cascadeEffects || []
+          breakingChanges: d.schemaImpact?.breakingChanges ?? [],
+          nonBreakingChanges: d.schemaImpact?.nonBreakingChanges ?? [],
+          cascadeEffects: d.schemaImpact?.cascadeEffects ?? []
         },
-        dataRisks: (d.dataRisks || []).map((r: any) => ({
+        dataRisks: (d.dataRisks ?? []).map((r) => ({
           description: r.description,
           severity: this.normalizeRiskLevel(r.severity)
         })),
-        rollbacks: (d.rollbacks || []).map((r: any) => ({
+        rollbacks: (d.rollbacks ?? []).map((r) => ({
           description: r.description,
           sql: r.sql,
-          safetyLevel: ['safe', 'manual_review', 'destructive'].includes(r.safetyLevel) ? r.safetyLevel : 'manual_review'
+          safetyLevel: (['safe', 'manual_review', 'destructive'].includes(r.safetyLevel)
+            ? r.safetyLevel
+            : 'manual_review') as RollbackSuggestion['safetyLevel']
         })),
         score: Math.min(Math.max(Math.round(d.score ?? 5), 1), 10),
         explanation: d.explanation ?? '',
@@ -242,7 +255,7 @@ Table sizes: ${rowInfo || 'none available'}`;
       };
     } catch (err) {
       this.logger.warn(`Consolidated AI error: ${err}`);
-      let score = Math.min(deps.filter(d => d.severity === 'critical').length, 2);
+      const score = Math.min(deps.filter(d => d.severity === 'critical').length, 2);
       return {
         schemaImpact: { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
         dataRisks: [],

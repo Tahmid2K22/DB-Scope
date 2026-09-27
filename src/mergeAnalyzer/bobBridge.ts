@@ -166,7 +166,7 @@ export function extractJson(raw: string): BobConflictResolution[] | null {
   }
 
   // Strip markdown code fences if present
-  let text = raw.replace(/```(?:json)?\s*/gi, '').replace(/```\s*/g, '');
+  const text = raw.replace(/```(?:json)?\s*/gi, '').replace(/```\s*/g, '');
 
   // Find the outermost JSON array: first '[' to last ']'
   const start = text.indexOf('[');

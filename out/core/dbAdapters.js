@@ -293,7 +293,7 @@ class OracleAdapter {
             extractedAt: Date.now(),
         };
     }
-    async extractTablesSchema(tableNames) {
+    async extractTablesSchema(_tableNames) {
         this.logger.warn('OracleAdapter: extractTablesSchema stub');
         return {};
     }

@@ -21,7 +21,10 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Fix binary permissions (checked-in node_modules loses +x on Linux)
+        run: chmod +x node_modules/.bin/* 2>/dev/null || true
 
       - name: TypeScript compile
         run: npm run compile

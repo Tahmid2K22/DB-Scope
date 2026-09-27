@@ -96,7 +96,7 @@ function extractTables(sql: string): string[] {
       while ((match = regex.exec(sql)) !== null) {
         const table = match[1].replace(/[`"]/g, '');
         // Skip dotted names (schema.table) — keep only the table part
-        const tableName = table.includes('.') ? table.split('.').pop()! : table;
+        const tableName = table.includes('.') ? table.split('.').pop() ?? table : table;
         if (!SQL_KEYWORDS.has(tableName.toUpperCase())) {
           tables.push(tableName);
         }

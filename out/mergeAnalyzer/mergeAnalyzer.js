@@ -345,7 +345,7 @@ class MergeAnalyzer {
             `-- Preferred type: ${preferred}\n` +
             `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE ${preferred} USING ${column}::${preferred};`;
     }
-    generateReconciledSql(conflicts, unified) {
+    generateReconciledSql(conflicts, _unified) {
         const lines = [
             '-- ============================================================',
             '-- DB-Scope: Reconciliation SQL (Auto-generated)',

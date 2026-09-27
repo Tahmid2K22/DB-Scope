@@ -48,7 +48,8 @@
       },
       {
         "command": "dbscope.openDashboard",
-        "title": "DB-Scope: Open Dashboard"
+        "title": "DB-Scope: Open Dashboard",
+        "icon": "$(layout-panel)"
       },
       {
         "command": "dbscope.showHistory",
@@ -130,6 +131,13 @@
       ]
     },
     "menus": {
+      "view/title": [
+        {
+          "command": "dbscope.openDashboard",
+          "when": "view == dbscope.dashboardView",
+          "group": "navigation"
+        }
+      ],
       "editor/context": [
         {
           "command": "dbscope.analyzeBlastRadius",
@@ -146,15 +154,15 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "compile": "node node_modules/typescript/bin/tsc -p ./",
+    "watch": "node node_modules/typescript/bin/tsc -watch -p ./",
     "pretest": "npm run compile",
     "test": "node test/member1.run.test.js && node test/member2.run.test.js && node src/mergeAnalyzer/mergeAnalyzer.test.js",
     "test:member1": "node test/member1.run.test.js",
     "test:member2": "node test/member2.run.test.js",
     "test:member3": "node src/mergeAnalyzer/mergeAnalyzer.test.js",
-    "lint": "eslint src --ext ts",
-    "lint:fix": "eslint src --ext ts --fix",
+    "lint": "node node_modules/eslint/bin/eslint.js src --ext ts",
+    "lint:fix": "node node_modules/eslint/bin/eslint.js src --ext ts --fix",
     "package": "vsce package"
   },
   "dependencies": {

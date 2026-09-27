@@ -78,6 +78,14 @@ const sqlParser_1 = require("../utils/sqlParser");
 const blastRadiusAnalyzer_1 = require("../blastRadius/blastRadiusAnalyzer");
 const sqlHoverProvider_1 = require("../hoverProvider/sqlHoverProvider");
 // ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+/** Calls a private method without `any` casts (identical runtime semantics). */
+function priv(obj, method, ...args) {
+    const fn = obj[method];
+    return fn(...args);
+}
+// ─────────────────────────────────────────────────────────────────────────────
 // STUBS  (no VS Code API, no live DB needed)
 // ─────────────────────────────────────────────────────────────────────────────
 /** Minimal SchemaStateMap stub — only the two methods the analyzer calls */
@@ -170,31 +178,31 @@ class StubDocument {
 // TESTABLE SUBCLASSES — expose private methods via type cast
 // ─────────────────────────────────────────────────────────────────────────────
 class T_Analyzer extends blastRadiusAnalyzer_1.BlastRadiusAnalyzer {
-    // Expose private methods
-    schemaImpact(sql) { return this.analyzeSchemaImpact((0, sqlParser_1.parseSql)(sql)); }
-    dataRisks(sql) { return this.assessDataIntegrityRisks((0, sqlParser_1.parseSql)(sql)); }
-    rollbacks(sql) { return this.buildRollbackSuggestions((0, sqlParser_1.parseSql)(sql)); }
-    modelName(t) { return this.deriveModelName(t); }
-    depSeverity(line) { return this.classifyDepSeverity(line); }
-    sizeFactor(tbls) { return this.getTableSizeFactor(tbls); }
-    toLevel(n) { return this.scoreToLevel(n); }
+    // Expose private methods (typed via priv helper — no `any` casts)
+    schemaImpact(sql) { return priv(this, 'analyzeSchemaImpact', (0, sqlParser_1.parseSql)(sql)); }
+    dataRisks(sql) { return priv(this, 'assessDataIntegrityRisks', (0, sqlParser_1.parseSql)(sql)); }
+    rollbacks(sql) { return priv(this, 'buildRollbackSuggestions', (0, sqlParser_1.parseSql)(sql)); }
+    modelName(t) { return priv(this, 'deriveModelName', t); }
+    depSeverity(line) { return priv(this, 'classifyDepSeverity', line); }
+    sizeFactor(tbls) { return priv(this, 'getTableSizeFactor', tbls); }
+    toLevel(n) { return priv(this, 'scoreToLevel', n); }
     score(s, d, r, dc, t) {
-        return this.calculateRiskScore(s, d, r, dc, t);
+        return priv(this, 'calculateRiskScore', s, d, r, dc, t);
     }
     suggestions(s, d, r, sc) {
-        return this.buildSuggestions(s, d, r, sc);
+        return priv(this, 'buildSuggestions', s, d, r, sc);
     }
 }
 class T_Hover extends sqlHoverProvider_1.SqlHoverProvider {
     fromString(text, baseOffset, doc) {
-        return this.extractSqlFromString(text, baseOffset, doc);
+        return priv(this, 'extractSqlFromString', text, baseOffset, doc);
     }
     stmtAt(doc, text, offset) {
-        return this.extractStatementAt(doc, text, offset);
+        return priv(this, 'extractStatementAt', doc, text, offset);
     }
-    emoji(level) { return this.riskEmoji(level); }
+    emoji(level) { return priv(this, 'riskEmoji', level); }
     hover(result, range) {
-        return this.buildHover(result, range);
+        return priv(this, 'buildHover', result, range);
     }
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,9 +218,10 @@ async function test(name, fn) {
         passed++;
     }
     catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         console.error(`  ❌  ${name}`);
-        console.error(`       ${err.message}`);
-        failures.push(`${name}: ${err.message}`);
+        console.error(`       ${message}`);
+        failures.push(`${name}: ${message}`);
         failed++;
     }
 }
@@ -254,7 +263,7 @@ const emptySchema = new StubSchema({});
 const analyzer = new T_Analyzer(schema);
 const aEmpty = new T_Analyzer(emptySchema);
 // Stub vscode.Range / vscode.MarkdownString / vscode.Hover for hover tests
-const origRange = global.vscode?.Range;
+const _origRange = global.vscode?.['Range'];
 global.vscode = {
     Range: StubRange,
     Position: StubPosition,
@@ -647,7 +656,11 @@ const hover = new T_Hover(hoverAnalyzerStub);
         assert.strictEqual(s1, s2, 'Score should be same for 2 and 3 breaking changes (cap 4)');
     });
     test('9-04  2 critical data risks → contributes 2 pts (cap)', () => {
-        const data_ = [{ severity: 'critical' }, { severity: 'critical' }, { severity: 'critical' }];
+        const data_ = [
+            { description: 'DELETE without WHERE removes all rows', severity: 'critical' },
+            { description: 'UPDATE without WHERE modifies all rows', severity: 'critical' },
+            { description: 'DROP without backup destroys data', severity: 'critical' },
+        ];
         const s = analyzer.score(emptySchema_, [], data_, [], ['tiny']);
         assert.ok(s >= 2);
     });
@@ -659,7 +672,12 @@ const hover = new T_Hover(hoverAnalyzerStub);
     });
     test('9-06  Score never exceeds 10', () => {
         const schema_ = { breakingChanges: ['a', 'b', 'c'], nonBreakingChanges: [], cascadeEffects: ['x', 'x', 'x'] };
-        const data_ = [{ severity: 'critical' }, { severity: 'critical' }, { severity: 'high' }, { severity: 'high' }];
+        const data_ = [
+            { description: 'DELETE without WHERE removes all rows', severity: 'critical' },
+            { description: 'UPDATE without WHERE modifies all rows', severity: 'critical' },
+            { description: 'DROP COLUMN destroys data', severity: 'high' },
+            { description: 'DROP FOREIGN KEY removes constraint', severity: 'high' },
+        ];
         const deps_ = Array(10).fill({ severity: 'critical', filePath: 'x', tableName: 't', usage: 'u' });
         const docs_ = Array(10).fill({ filePath: 'r', issue: 'i', suggestion: 's' });
         const s = analyzer.score(schema_, deps_, data_, docs_, ['huge']);

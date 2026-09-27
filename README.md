@@ -1,7 +1,7 @@
 # 🔬 DB-Scope — ImpactLens for Databases
 
-> **AI-powered database lifecycle platform built as a VS Code extension.**  
-> Predicts migration impact, provides real-time SQL diagnostics, detects schema duplicates, and resolves database merge conflicts — all orchestrated through IBM Bob's parallel subagents.
+> **Database lifecycle extension for IBM Bob IDE.**  
+> Predicts migration impact, provides real-time SQL diagnostics, detects schema duplicates, and resolves database merge conflicts — running inside Bob and calling back into Bob Shell's parallel subagents.
 
 ---
 
@@ -9,7 +9,8 @@
 
 **Team:** DB-Scope  
 **Track:** Developer Productivity / Database Tooling  
-**Built with:** IBM Bob IDE, IBM Granite, TypeScript, VS Code Extension API
+**Built with:** IBM Bob IDE (v2.0.x), IBM Granite via watsonx.ai, TypeScript, VS Code Extension API  
+**Runs on:** IBM Bob IDE v2.0.2+ (v1.0.3 / v2.0.0 are retired — see [Bob docs](https://bob.ibm.com/docs/ide))
 
 ---
 
@@ -43,7 +44,7 @@ Today, when a developer runs `ALTER TABLE users DROP COLUMN phone`, they don't k
 
 ```mermaid
 graph TD
-    A[VS Code SQL Editor] -->|Hover / Edit| B(SqlHoverProvider / SqlDiagnosticProvider)
+    A[Bob IDE SQL Editor] -->|Hover / Edit| B(SqlHoverProvider / SqlDiagnosticProvider)
     B --> C{ContextManager}
     C -->|Fetch Live Schema| D[(PostgreSQL / MySQL)]
     
@@ -62,13 +63,17 @@ graph TD
     I --> J
     
     J -->|LRU Cache| C
+
+    K[Activity Bar Sidebar<br/>(DashboardViewProvider)] -->|Command buttons| A
 ```
 
 ## 🚀 Features
 
 ### ⚡ Real-Time IDE Features
+- **Sidebar Overview** — DB-Scope activity-bar icon shows an Overview on activation (no command needed): one-click buttons for every analysis + live entry points
 - **SQL Hover Tooltips** — hover any SQL to see risk score, affected tables, data risks, and cascade effects
 - **Real-Time Diagnostics** — red squiggles + modal interrupts for `DROP TABLE`, `DELETE` without `WHERE`, `TRUNCATE`, etc.
+- **Quick Fixes** — code actions (lightbulb) offering safe auto-fixes alongside diagnostics
 - **Context Manager** — auto-scans codebase for schema on startup; updates on every SQL save (500ms debounce)
 - **Status Bar** — live status showing DB-Scope state
 
@@ -87,10 +92,13 @@ graph TD
 ### 🔀 Database Merge Conflict Analyzer
 - Compares two SQL schema files or exported JSON schemas
 - Detects: type mismatches, missing tables, missing columns, nullable differences
+- **Bob Shell enrichment** — when the `bob` CLI is on PATH, conflicts are sent to `bob run` (prompt via stdin, capped at 10 turns / $0.50) for confidence scores, affected files, and migration plans; without Bob it degrades gracefully to deterministic analysis
 - Generates complete reconciliation SQL
 - Produces unified merged schema
 
 ### 📊 Dashboard
+- **Sidebar Overview** (`DashboardViewProvider`) — always-on webview in the DB-Scope activity-bar container; visible as soon as the extension activates, with buttons for every command
+- **Full Dashboard** (`DashboardPanel`) — opens beside the editor via commands with full reports
 - **Interactive Tab Navigation** — Seamlessly switch between Overview, Impact Analysis, Merge Analysis, Duplicates, and Timeline without reloading
 - **Overview & Schema Health** — Live stats on table/column counts and AI integration status
 - **Impact Analysis** — Color-coded risk score bars, affected files, and mitigation suggestions
@@ -103,9 +111,10 @@ graph TD
 ## 🛠️ Setup & Installation
 
 ### Prerequisites
-- VS Code 1.90+
+- IBM Bob IDE v2.0.2+ ([download](https://bob.ibm.com/download))
 - Node.js 18+
 - npm 9+
+- Bob Shell (`bob` CLI on PATH) — optional; only needed for AI-enriched merge-conflict analysis (everything else works without it)
 
 ### Install Dependencies
 ```bash
@@ -117,16 +126,25 @@ npm install
 npm run compile
 ```
 
-### Run in VS Code (Development)
-1. Open this folder in VS Code
+### Run in IBM Bob IDE (Development)
+1. Open this folder in IBM Bob IDE
 2. Press `F5` to launch Extension Development Host
 3. Open any `.sql` file or a project with SQL migrations
+4. Click the **DB-Scope** icon in the Activity Bar — the sidebar Overview is already there (no command needed)
+
+### Verify (lint + tests)
+```bash
+npm run lint
+npm test
+```
+CI (`.github/workflows/ci.yml`) runs install → compile → lint → VSIX packaging on every push to `main`/`dev`.
 
 ### Package as VSIX
 ```bash
 npm install -g @vscode/vsce
 vsce package
 ```
+Then install the resulting `.vsix` into IBM Bob IDE via the Extensions view (`Install from VSIX...`).
 
 ---
 
@@ -155,6 +173,9 @@ mysql://user:password@localhost:3306/mydb
 ---
 
 ## 🎮 Usage
+
+### Sidebar
+Click the **DB-Scope** icon in the Activity Bar for the always-on Overview: buttons for impact analysis, duplicates, merge conflicts, context fetch, timeline, and the full dashboard. (Requires the extension to be active — open a `.sql`/`.ts`/`.js` file or a workspace containing `.sql` files.)
 
 ### Hover Tooltip
 Open any `.sql` file (or a `.ts`/`.js` file with SQL strings) and hover over a query:
@@ -196,14 +217,15 @@ Select Schema A file → Select Schema B file → View conflict report
 
 > *"Copilot can assist with individual code tasks. Bob can orchestrate multi-step, multi-file, multi-agent workflows."*
 
-DB-Scope was built **natively with IBM Bob 2.0** and **watsonx.ai Granite**, leveraging:
+DB-Scope relates to Bob in three ways — it **runs in** Bob IDE, was **built with** Bob, and **calls back into** Bob at runtime:
 
-| Feature | How We Used It |
-|-------------|----------------|
+| Relationship | How |
+|-------------|-----|
+| **Runs in Bob IDE** | DB-Scope is an extension for [IBM Bob](https://bob.ibm.com/) (v2.0.2+), built on the VS Code Extension API (`engines.vscode`). Sidebar, hover, diagnostics, and quick fixes all live inside the Bob IDE workflow. |
+| **Built with Bob** | Developed using Bob's `schema-analyst` custom mode, parallel subagents (4 simultaneous dimensions for impact analysis), and GitHub MCP for codebase-wide ORM dependency search. |
+| **Calls Bob Shell** | The Merge Analyzer shells out to `bob run` (stdin prompt, `--max-turns 10`, `--max-cost 0.50`) for confidence scores, affected files, and migration plans — degrading gracefully when the CLI isn't installed. |
 | **watsonx.ai Granite** | Replaced deterministic regex with Granite for SQL parsing, risk scoring, data integrity checks, and auto-generating rollback SQL. |
 | **Enterprise Token Optimization** | (Member 1) Implemented **Prompt Consolidation** (1 API call instead of 4), **LRU Caching** (0ms latency on repeat hovers), and **Context Pruning** (99% token reduction on large DBs). |
-| **Parallel Subagents** | IBM Bob orchestrated 4 subagents to run simultaneously for the 4-dimension impact analysis (schema, apps, data, docs). |
-| **Custom Modes & MCP** | `schema-analyst` mode for parsing SQL, and GitHub MCP to search the codebase for ORM dependencies across all files. |
 
 Without Bob's orchestration and Granite's enterprise reasoning, this tool would be a naive regex linter. Instead, it is a fully optimized, production-ready AI Senior DBA.
 
@@ -215,6 +237,9 @@ Without Bob's orchestration and Granite's enterprise reasoning, this tool would 
 DB-Scope/
 ├── src/
 │   ├── extension.ts                  # Extension entry point
+│   ├── ai/
+│   │   ├── watsonxClient.ts          # IBM watsonx.ai Granite client
+│   │   └── promptBuilder.ts          # Consolidated-prompt builder
 │   ├── core/
 │   │   ├── types.ts                  # Shared type definitions
 │   │   ├── schemaStateMap.ts         # Living schema snapshot store
@@ -224,22 +249,36 @@ DB-Scope/
 │   ├── hoverProvider/
 │   │   └── sqlHoverProvider.ts       # Member 1: SQL hover tooltips
 │   ├── contextManager/
-│   │   └── contextManager.ts         # Member 2: Codebase schema scanner
+│   │   ├── contextManager.ts         # Member 2: Codebase schema scanner
+│   │   └── schemaParsers.ts          # Member 2: Multi-dialect schema parsing
 │   ├── diagnostics/
-│   │   └── sqlDiagnosticProvider.ts  # Member 2: Real-time diagnostics
+│   │   ├── sqlDiagnosticProvider.ts  # Member 2: Real-time diagnostics
+│   │   ├── schemaDiagnostics.ts      # Member 2: Pattern-rule engine
+│   │   ├── sqlCodeActionProvider.ts  # Quick fixes (lightbulb actions)
+│   │   └── sqlTokenizer.ts           # SQL clause tokenizer
 │   ├── duplicateDetector/
 │   │   └── duplicateDetector.ts      # Member 2: Semantic duplicate detection
 │   ├── mergeAnalyzer/
-│   │   └── mergeAnalyzer.ts          # Member 3: DB merge conflict analysis
+│   │   ├── mergeAnalyzer.ts          # Member 3: DB merge conflict analysis
+│   │   └── bobBridge.ts              # Member 3: IBM Bob shell integration
 │   ├── dashboard/
-│   │   └── dashboardPanel.ts         # Shared: WebView dashboard
+│   │   ├── dashboardPanel.ts         # Shared: full WebView dashboard panel
+│   │   └── dashboardViewProvider.ts  # Sidebar Overview webview (no command needed)
+│   ├── test/
+│   │   ├── blastRadiusAnalyzer.test.ts   # Analyzer unit tests
+│   │   └── member1.comprehensive.test.ts # Full member-1 coverage suite
 │   └── utils/
 │       ├── logger.ts                 # Output channel logger
 │       └── sqlParser.ts             # SQL tokenizer/parser
+├── test/                             # Runnable suites (member1/2 + merge)
+├── media/
+│   └── icon.svg                      # Activity-bar icon
+├── demo-project/                     # Sample workspace for manual testing
+├── .github/workflows/ci.yml          # CI: install → compile → lint → VSIX
 ├── bob_sessions/                     # IBM Bob IDE task session screenshots
 │   └── README.md
 ├── package.json                      # Extension manifest + npm config
-├── tsconfig.json                     # TypeScript config
+├── tsconfig.json                     # TypeScript config (strict)
 └── README.md                         # This file
 ```
 
@@ -260,7 +299,7 @@ DB-Scope/
 - **23 production outages prevented** (demo data)
 - **$1.2M saved** in incident response costs
 - **87% reduction** in manual dependency checking time
-- **5 objectives** fulfilled in one unified VS Code extension
+- **5 objectives** fulfilled in one unified Bob IDE extension
 
 ---
 

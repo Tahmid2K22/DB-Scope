@@ -380,7 +380,7 @@ export class MergeAnalyzer {
       `ALTER TABLE ${table} ALTER COLUMN ${column} TYPE ${preferred} USING ${column}::${preferred};`;
   }
 
-  private generateReconciledSql(conflicts: MergeConflict[], unified: DatabaseSchema): string {
+  private generateReconciledSql(conflicts: MergeConflict[], _unified: DatabaseSchema): string {
     const lines: string[] = [
       '-- ============================================================',
       '-- DB-Scope: Reconciliation SQL (Auto-generated)',

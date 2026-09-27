@@ -50,7 +50,24 @@ import {
   BlastRadiusResult,
   RiskLevel,
   RollbackSuggestion,
+  DataIntegrityRisk,
+  SchemaImpact,
+  AppDependency,
+  DocumentationDrift,
 } from '../core/types';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Calls a private method without `any` casts (identical runtime semantics). */
+function priv<T>(obj: object, method: string, ...args: unknown[]): T {
+  const fn = (obj as unknown as Record<string, (...a: unknown[]) => unknown>)[method];
+  return fn(...args) as T;
+}
+
+/** Structural mirror of the hover provider's private SqlMatch ({ sql, range }). */
+interface StubSqlMatch { sql: string; range: StubRange; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STUBS  (no VS Code API, no live DB needed)
@@ -68,7 +85,7 @@ class StubSchema {
 
 /** Minimal vscode.Range stub — holds start/end position objects */
 class StubRange {
-  constructor(public readonly start: any, public readonly end: any) {}
+  constructor(public readonly start: StubPosition, public readonly end: StubPosition) {}
 }
 
 /** Minimal vscode.Position stub */
@@ -88,7 +105,7 @@ class StubMarkdownString {
 
 /** Minimal vscode.Hover stub */
 class StubHover {
-  constructor(public readonly contents: any, public readonly range?: any) {}
+  constructor(public readonly contents: unknown, public readonly range?: unknown) {}
 }
 
 /** Minimal vscode.TextDocument stub — enough for extractStatementAt / extractSqlFromString */
@@ -97,7 +114,7 @@ class StubDocument {
     public readonly content: string,
     public readonly languageId = 'sql',
   ) {}
-  getText(range?: any): string {
+  getText(range?: unknown): string {
     if (!range) { return this.content; }
     // Simple: return full content for any range (sufficient for our tests)
     return this.content;
@@ -106,13 +123,13 @@ class StubDocument {
     const lines = this.content.split('\n');
     return { text: lines[lineIndex] ?? '' };
   }
-  offsetAt(pos: any): number {
+  offsetAt(pos: StubPosition): number {
     const lines = this.content.split('\n');
     let offset = 0;
     for (let i = 0; i < pos.line; i++) { offset += lines[i].length + 1; }
     return offset + pos.character;
   }
-  positionAt(offset: number): any {
+  positionAt(offset: number): StubPosition {
     let line = 0;
     let char = 0;
     for (let i = 0; i < offset && i < this.content.length; i++) {
@@ -128,32 +145,32 @@ class StubDocument {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class T_Analyzer extends BlastRadiusAnalyzer {
-  // Expose private methods
-  schemaImpact(sql: string)  { return (this as any).analyzeSchemaImpact(parseSql(sql)); }
-  dataRisks(sql: string)     { return (this as any).assessDataIntegrityRisks(parseSql(sql)); }
-  rollbacks(sql: string)     { return (this as any).buildRollbackSuggestions(parseSql(sql)); }
-  modelName(t: string)       { return (this as any).deriveModelName(t); }
-  depSeverity(line: string)  { return (this as any).classifyDepSeverity(line); }
-  sizeFactor(tbls: string[]) { return (this as any).getTableSizeFactor(tbls); }
-  toLevel(n: number)         { return (this as any).scoreToLevel(n); }
-  score(s: any, d: any, r: any, dc: any, t: any) {
-    return (this as any).calculateRiskScore(s, d, r, dc, t);
+  // Expose private methods (typed via priv helper — no `any` casts)
+  schemaImpact(sql: string): SchemaImpact  { return priv(this, 'analyzeSchemaImpact', parseSql(sql)); }
+  dataRisks(sql: string): Promise<DataIntegrityRisk[]> { return priv(this, 'assessDataIntegrityRisks', parseSql(sql)); }
+  rollbacks(sql: string): RollbackSuggestion[] { return priv(this, 'buildRollbackSuggestions', parseSql(sql)); }
+  modelName(t: string): string       { return priv(this, 'deriveModelName', t); }
+  depSeverity(line: string): RiskLevel { return priv(this, 'classifyDepSeverity', line); }
+  sizeFactor(tbls: string[]): number { return priv(this, 'getTableSizeFactor', tbls); }
+  toLevel(n: number): RiskLevel         { return priv(this, 'scoreToLevel', n); }
+  score(s: SchemaImpact, d: AppDependency[], r: DataIntegrityRisk[], dc: DocumentationDrift[], t: string[]): number {
+    return priv(this, 'calculateRiskScore', s, d, r, dc, t);
   }
-  suggestions(s: any, d: any, r: any, sc: number) {
-    return (this as any).buildSuggestions(s, d, r, sc);
+  suggestions(s: SchemaImpact, d: AppDependency[], r: DataIntegrityRisk[], sc: number): string[] {
+    return priv(this, 'buildSuggestions', s, d, r, sc);
   }
 }
 
 class T_Hover extends SqlHoverProvider {
-  fromString(text: string, baseOffset: number, doc: any) {
-    return (this as any).extractSqlFromString(text, baseOffset, doc);
+  fromString(text: string, baseOffset: number, doc: StubDocument): StubSqlMatch | null {
+    return priv(this, 'extractSqlFromString', text, baseOffset, doc);
   }
-  stmtAt(doc: any, text: string, offset: number) {
-    return (this as any).extractStatementAt(doc, text, offset);
+  stmtAt(doc: StubDocument, text: string, offset: number): StubSqlMatch | null {
+    return priv(this, 'extractStatementAt', doc, text, offset);
   }
-  emoji(level: RiskLevel) { return (this as any).riskEmoji(level); }
-  hover(result: BlastRadiusResult, range?: any) {
-    return (this as any).buildHover(result, range);
+  emoji(level: RiskLevel): string { return priv(this, 'riskEmoji', level); }
+  hover(result: BlastRadiusResult, range?: unknown): StubHover {
+    return priv(this, 'buildHover', result, range);
   }
 }
 
@@ -170,10 +187,11 @@ async function test(name: string, fn: () => void | Promise<void>) {
     await fn();
     console.log(`  ✅  ${name}`);
     passed++;
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
     console.error(`  ❌  ${name}`);
-    console.error(`       ${err.message}`);
-    failures.push(`${name}: ${err.message}`);
+    console.error(`       ${message}`);
+    failures.push(`${name}: ${message}`);
     failed++;
   }
 }
@@ -220,8 +238,8 @@ const analyzer   = new T_Analyzer(schema as unknown as SchemaStateMap);
 const aEmpty     = new T_Analyzer(emptySchema as unknown as SchemaStateMap);
 
 // Stub vscode.Range / vscode.MarkdownString / vscode.Hover for hover tests
-const origRange = (global as any).vscode?.Range;
-(global as any).vscode = {
+const _origRange = (global as unknown as { vscode?: Record<string, unknown> }).vscode?.['Range'];
+(global as unknown as { vscode?: Record<string, unknown> }).vscode = {
   Range: StubRange,
   Position: StubPosition,
   Hover: StubHover,
@@ -443,57 +461,57 @@ section('3  BlastRadiusAnalyzer — assessDataIntegrityRisks');
 
 test('3-01  DELETE without WHERE → critical risk', async () => {
   const r = await analyzer.dataRisks('DELETE FROM orders');
-  assert.ok(r.some((x: any) => x.severity === 'critical' && /WHERE/.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'critical' && /WHERE/.test(x.description)));
 });
 
 test('3-02  DELETE WITH WHERE → no critical risk', async () => {
   const r = await analyzer.dataRisks("DELETE FROM orders WHERE status = 'done'");
-  assert.ok(!r.some((x: any) => x.severity === 'critical'), 'No critical risk expected');
+  assert.ok(!r.some((x: DataIntegrityRisk) => x.severity === 'critical'), 'No critical risk expected');
 });
 
 test('3-03  UPDATE without WHERE → critical risk', async () => {
   const r = await analyzer.dataRisks("UPDATE users SET active = 0");
-  assert.ok(r.some((x: any) => x.severity === 'critical'));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'critical'));
 });
 
 test('3-04  UPDATE WITH WHERE → no critical risk', async () => {
   const r = await analyzer.dataRisks("UPDATE users SET active = 0 WHERE id = 5");
-  assert.ok(!r.some((x: any) => x.severity === 'critical'));
+  assert.ok(!r.some((x: DataIntegrityRisk) => x.severity === 'critical'));
 });
 
 test('3-05  ALTER DROP COLUMN → high risk', async () => {
   const r = await analyzer.dataRisks('ALTER TABLE users DROP COLUMN phone');
-  assert.ok(r.some((x: any) => x.severity === 'high' && /DROP COLUMN/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'high' && /DROP COLUMN/i.test(x.description)));
 });
 
 test('3-06  NOT NULL without DEFAULT (not ADD COLUMN) → high risk', async () => {
   const r = await analyzer.dataRisks('ALTER TABLE users MODIFY score INT NOT NULL');
-  assert.ok(r.some((x: any) => x.severity === 'high' && /NOT NULL/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'high' && /NOT NULL/i.test(x.description)));
 });
 
 test('3-07  CASCADE keyword → medium risk', async () => {
   const r = await analyzer.dataRisks('DELETE FROM users CASCADE');
-  assert.ok(r.some((x: any) => x.severity === 'medium' && /CASCADE/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'medium' && /CASCADE/i.test(x.description)));
 });
 
 test('3-08  DROP FOREIGN KEY → high risk', async () => {
   const r = await analyzer.dataRisks('ALTER TABLE orders DROP FOREIGN KEY fk_user');
-  assert.ok(r.some((x: any) => x.severity === 'high' && /FOREIGN KEY/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'high' && /FOREIGN KEY/i.test(x.description)));
 });
 
 test('3-09  DROP PRIMARY KEY → high risk', async () => {
   const r = await analyzer.dataRisks('ALTER TABLE users DROP PRIMARY KEY');
-  assert.ok(r.some((x: any) => x.severity === 'high' && /PRIMARY KEY/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'high' && /PRIMARY KEY/i.test(x.description)));
 });
 
 test('3-10  CREATE UNIQUE INDEX → high risk', async () => {
   const r = await analyzer.dataRisks('CREATE UNIQUE INDEX idx_email ON users(email)');
-  assert.ok(r.some((x: any) => x.severity === 'high' && /UNIQUE/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'high' && /UNIQUE/i.test(x.description)));
 });
 
 test('3-11  ENGINE= change → medium risk', async () => {
   const r = await analyzer.dataRisks('ALTER TABLE users ENGINE=MyISAM');
-  assert.ok(r.some((x: any) => x.severity === 'medium' && /ENGINE/i.test(x.description)));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'medium' && /ENGINE/i.test(x.description)));
 });
 
 test('3-12  Safe SELECT → zero risks', async () => {
@@ -503,7 +521,7 @@ test('3-12  Safe SELECT → zero risks', async () => {
 
 test('3-13  Case insensitivity — lowercase keywords trigger rules', async () => {
   const r = await analyzer.dataRisks('delete from orders');
-  assert.ok(r.some((x: any) => x.severity === 'critical'));
+  assert.ok(r.some((x: DataIntegrityRisk) => x.severity === 'critical'));
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -530,44 +548,44 @@ test('4-03  ALTER DROP COLUMN (column in schema) → safe ADD COLUMN with correc
   const r: RollbackSuggestion[] = analyzer.rollbacks('ALTER TABLE users DROP COLUMN phone');
   const rb = r.find((x: RollbackSuggestion) => /ADD COLUMN phone/i.test(x.sql));
   assert.ok(rb, 'Expected ADD COLUMN phone rollback');
-  assert.strictEqual(rb!.safetyLevel, 'safe');
-  assert.ok(/VARCHAR/i.test(rb!.sql), 'Expected VARCHAR type from schema');
+  assert.strictEqual(rb.safetyLevel, 'safe');
+  assert.ok(/VARCHAR/i.test(rb.sql), 'Expected VARCHAR type from schema');
 });
 
 test('4-04  ALTER DROP COLUMN (column NOT in schema) → manual_review with unknown type', () => {
   const r: RollbackSuggestion[] = analyzer.rollbacks('ALTER TABLE users DROP COLUMN nonexistent_col');
   const rb = r.find((x: RollbackSuggestion) => /ADD COLUMN nonexistent_col/i.test(x.sql));
   assert.ok(rb, 'Expected ADD COLUMN rollback even for unknown col');
-  assert.strictEqual(rb!.safetyLevel, 'manual_review');
-  assert.ok(/unknown/i.test(rb!.sql));
+  assert.strictEqual(rb.safetyLevel, 'manual_review');
+  assert.ok(/unknown/i.test(rb.sql));
 });
 
 test('4-05  ALTER ADD COLUMN → safe DROP COLUMN rollback', () => {
   const r: RollbackSuggestion[] = analyzer.rollbacks('ALTER TABLE users ADD COLUMN nickname VARCHAR(100)');
   const rb = r.find((x: RollbackSuggestion) => /DROP COLUMN nickname/i.test(x.sql));
   assert.ok(rb, 'Expected DROP COLUMN nickname rollback');
-  assert.strictEqual(rb!.safetyLevel, 'safe');
+  assert.strictEqual(rb.safetyLevel, 'safe');
 });
 
 test('4-06  ALTER RENAME COLUMN → reverse rename rollback', () => {
   const r: RollbackSuggestion[] = analyzer.rollbacks('ALTER TABLE users RENAME COLUMN phone TO mobile');
   const rb = r.find((x: RollbackSuggestion) => /RENAME COLUMN mobile TO phone/i.test(x.sql));
-  assert.ok(rb, `Expected reverse rename. Got: ${r.map((x: any) => x.sql).join(' | ')}`);
-  assert.strictEqual(rb!.safetyLevel, 'safe');
+  assert.ok(rb, `Expected reverse rename. Got: ${r.map((x: RollbackSuggestion) => x.sql).join(' | ')}`);
+  assert.strictEqual(rb.safetyLevel, 'safe');
 });
 
 test('4-07  RENAME TABLE → reverse rename rollback', () => {
   const r: RollbackSuggestion[] = analyzer.rollbacks('RENAME TABLE users TO customers');
   const rb = r.find((x: RollbackSuggestion) => /RENAME TABLE customers TO users/i.test(x.sql));
   assert.ok(rb, `Expected reverse table rename`);
-  assert.strictEqual(rb!.safetyLevel, 'safe');
+  assert.strictEqual(rb.safetyLevel, 'safe');
 });
 
 test('4-08  CREATE INDEX → DROP INDEX rollback', () => {
   const r: RollbackSuggestion[] = analyzer.rollbacks('CREATE INDEX idx_email ON users(email)');
   const rb = r.find((x: RollbackSuggestion) => /DROP INDEX idx_email/i.test(x.sql));
   assert.ok(rb, 'Expected DROP INDEX rollback');
-  assert.strictEqual(rb!.safetyLevel, 'safe');
+  assert.strictEqual(rb.safetyLevel, 'safe');
 });
 
 test('4-09  CREATE UNIQUE INDEX → DROP INDEX rollback', () => {
@@ -664,9 +682,9 @@ test('8-08  score=1  → low',      () => assert.strictEqual(analyzer.toLevel(1)
 section('9  BlastRadiusAnalyzer — calculateRiskScore');
 
 const emptySchema_ = { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] };
-const emptyDeps_: any[] = [];
-const emptyData_: any[] = [];
-const emptyDocs_: any[] = [];
+const emptyDeps_: AppDependency[] = [];
+const emptyData_: DataIntegrityRisk[] = [];
+const emptyDocs_: DocumentationDrift[] = [];
 
 test('9-01  All empty inputs → minimum score 1', () => {
   const s = analyzer.score(emptySchema_, emptyDeps_, emptyData_, emptyDocs_, []);
@@ -687,7 +705,11 @@ test('9-03  Breaking changes capped at 4 (3 changes still cap at 4)', () => {
 });
 
 test('9-04  2 critical data risks → contributes 2 pts (cap)', () => {
-  const data_ = [{ severity: 'critical' }, { severity: 'critical' }, { severity: 'critical' }];
+  const data_: DataIntegrityRisk[] = [
+    { description: 'DELETE without WHERE removes all rows', severity: 'critical' },
+    { description: 'UPDATE without WHERE modifies all rows', severity: 'critical' },
+    { description: 'DROP without backup destroys data', severity: 'critical' },
+  ];
   const s = analyzer.score(emptySchema_, [], data_, [], ['tiny']);
   assert.ok(s >= 2);
 });
@@ -701,7 +723,12 @@ test('9-05  Large table (>1M rows) applies 1.5× multiplier', () => {
 
 test('9-06  Score never exceeds 10', () => {
   const schema_ = { breakingChanges: ['a','b','c'], nonBreakingChanges: [], cascadeEffects: ['x','x','x'] };
-  const data_   = [{ severity: 'critical' }, { severity: 'critical' }, { severity: 'high' }, { severity: 'high' }];
+  const data_: DataIntegrityRisk[]   = [
+    { description: 'DELETE without WHERE removes all rows', severity: 'critical' },
+    { description: 'UPDATE without WHERE modifies all rows', severity: 'critical' },
+    { description: 'DROP COLUMN destroys data', severity: 'high' },
+    { description: 'DROP FOREIGN KEY removes constraint', severity: 'high' },
+  ];
   const deps_   = Array(10).fill({ severity: 'critical', filePath: 'x', tableName: 't', usage: 'u' });
   const docs_   = Array(10).fill({ filePath: 'r', issue: 'i', suggestion: 's' });
   const s = analyzer.score(schema_, deps_, data_, docs_, ['huge']);
@@ -738,7 +765,7 @@ test('10-02  DROP breaking change → rename-first suggestion', () => {
 });
 
 test('10-03  DELETE without WHERE data risk → WHERE clause suggestion', () => {
-  const data_ = [{ description: 'DELETE without WHERE clause', severity: 'critical' }];
+  const data_: DataIntegrityRisk[] = [{ description: 'DELETE without WHERE clause', severity: 'critical' }];
   const s = analyzer.suggestions(emptySchema_, [], data_, 5);
   assert.ok(s.some((x: string) => /WHERE/i.test(x)));
 });
