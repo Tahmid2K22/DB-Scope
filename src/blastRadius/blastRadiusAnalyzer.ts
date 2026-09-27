@@ -33,6 +33,7 @@ const UNAVAILABLE: DimensionConfidence = {
 export class BlastRadiusAnalyzer {
   private readonly logger = Logger.getInstance();
   private readonly ai: WatsonxClient;
+  private analysisCache = new Map<string, BlastRadiusResult>();
 
   constructor(
     private readonly schemaState: SchemaStateMap,
@@ -72,107 +73,184 @@ export class BlastRadiusAnalyzer {
       getTable: (name: string) => liveTables[name] || this.schemaState.getTable(name)
     };
 
-    // Dimensions 1-4 run in parallel (each makes one Granite call)
-    const [schemaImpact, appDepsResult, dataRisksResult, docDrift] = await Promise.all([
-      this.analyzeSchemaImpact(parsed, activeSchema),
+    const prunedSchema: Record<string, TableDefinition> = {};
+    for (const tableName of parsed.tables) {
+      const t = activeSchema.getTable(tableName);
+      if (t) prunedSchema[tableName] = t;
+    }
+
+    const cacheKey = sql + "||" + JSON.stringify(prunedSchema);
+    if (this.analysisCache.has(cacheKey)) {
+      this.logger.info(`BlastRadius: cache hit for SQL`);
+      return this.analysisCache.get(cacheKey)!;
+    }
+
+    // Dimensions 2 and 4 run in parallel
+    const [appDepsResult, docDrift] = await Promise.all([
       this.findAppDependencies(parsed.tables),
-      this.assessDataIntegrityRisks(parsed, activeSchema),
       this.detectDocumentationDrift(parsed.tables),
     ]);
 
-    // Step 5: AI risk score — single call returns score + explanation + all 5 confidence scores
-    const scoreResult = await this.calculateRiskScore(
-      schemaImpact.impact,
-      appDepsResult.deps,
-      dataRisksResult.risks,
-      docDrift,
-      parsed.tables,
-      {
+    const contextStats = {
         filesScanned:    appDepsResult.filesScanned,
         totalFilesEst:   appDepsResult.totalFilesEst,
         schemaLoaded:    parsed.tables.some(t => !!activeSchema.getTable(t)),
         rowCountsKnown:  parsed.tables.some(t => activeSchema.getTable(t)?.rowCount !== undefined),
-        docFilesFound:   docDrift.length === 0, // if drifts found, doc files were scanned
-      },
-      activeSchema
+        docFilesFound:   docDrift.length === 0,
+    };
+
+    const consolidated = await this.performConsolidatedAnalysis(
+      parsed,
+      prunedSchema,
+      appDepsResult.deps,
+      docDrift,
+      contextStats,
+      dbType
     );
 
-    // Step 6: AI-written rollback SQL
-    const rollbackSuggestions = await this.buildRollbackSuggestions(parsed, activeSchema);
+    const riskLevel = this.scoreToLevel(consolidated.score);
 
-    const riskLevel = this.scoreToLevel(scoreResult.score);
-
-    return {
+    const result: BlastRadiusResult = {
       sql,
-      riskScore:          scoreResult.score,
+      riskScore:          consolidated.score,
       riskLevel,
       affectedTables:     parsed.tables,
-      schemaImpact:       schemaImpact.impact,
+      schemaImpact:       consolidated.schemaImpact,
       appDependencies:    appDepsResult.deps,
-      dataIntegrityRisks: dataRisksResult.risks,
+      dataIntegrityRisks: consolidated.dataRisks,
       documentationDrift: docDrift,
-      suggestions:        scoreResult.suggestions,
-      rollbackSuggestions,
-      riskExplanation:    scoreResult.explanation,
-      confidence:         scoreResult.confidence,
+      suggestions:        consolidated.suggestions,
+      rollbackSuggestions: consolidated.rollbacks,
+      riskExplanation:    consolidated.explanation,
+      confidence:         consolidated.confidence,
       generatedAt:        Date.now(),
     };
+
+    this.analysisCache.set(cacheKey, result);
+    if (this.analysisCache.size > 50) {
+      const firstKey = this.analysisCache.keys().next().value;
+      this.analysisCache.delete(firstKey!);
+    }
+
+    return result;
   }
 
   // ──────────────────────────────────────────────
-  // Dimension 1: AI Schema Impact
+  // Consolidated AI Analysis (Replaces D1, D3, Score, Rollbacks)
   // ──────────────────────────────────────────────
 
-  private async analyzeSchemaImpact(
+  private async performConsolidatedAnalysis(
     parsed: Awaited<ReturnType<typeof parseSqlAI>>,
-    activeSchema: { getTable(name: string): TableDefinition | null }
-  ): Promise<{ impact: SchemaImpact; confidence: DimensionConfidence }> {
+    prunedSchema: Record<string, TableDefinition>,
+    deps: AppDependency[],
+    docs: DocumentationDrift[],
+    context: {
+      filesScanned: number;
+      totalFilesEst: number;
+      schemaLoaded: boolean;
+      rowCountsKnown: boolean;
+      docFilesFound: boolean;
+    },
+    dbType: string
+  ): Promise<{
+    schemaImpact: SchemaImpact;
+    dataRisks: DataIntegrityRisk[];
+    rollbacks: RollbackSuggestion[];
+    score: number;
+    explanation: string;
+    suggestions: string[];
+    confidence: AnalysisConfidence;
+  }> {
+    const activeSchema = { getTable: (name: string) => prunedSchema[name] || null };
     const schemaContext = this.buildSchemaContext(parsed.tables, activeSchema);
-    const schemaAvailable = schemaContext !== 'Schema: not loaded';
+    
+    const rowInfo = parsed.tables.map(t => {
+      const tbl = activeSchema.getTable(t);
+      return tbl?.rowCount !== undefined ? `${t}: ${tbl.rowCount.toLocaleString()} rows` : `${t}: row count unknown`;
+    }).join('; ');
 
-    const system = `You are a database migration safety expert.
-Given a SQL statement and the current table schema, identify all schema-level impacts.
-Consider breaking changes (things that will break existing queries, ORMs, or APIs),
-non-breaking changes (backward-compatible additions), and cascade effects through foreign keys.
+    const system = `You are a senior DBA, migration risk expert, and database reliability engineer.
+Analyze this SQL migration holistically and return a consolidated JSON payload.
+Consider schema impact (breaking vs non-breaking), data integrity risks, and rollback generation.
+For rollbacks, use safetyLevel: "safe", "manual_review", or "destructive".
+Score risk from 1 (trivial) to 10 (catastrophic).
+Score confidence from 0 (no context) to 100 (full context).
 Return ONLY valid JSON with no extra text or markdown fences:
 {
-  "breakingChanges": ["<human-readable description>"],
-  "nonBreakingChanges": ["<human-readable description>"],
-  "cascadeEffects": ["<human-readable description>"],
-  "confidenceScore": 85,
-  "confidenceReason": "<what context was available or missing>"
+  "schemaImpact": {
+    "breakingChanges": ["..."],
+    "nonBreakingChanges": ["..."],
+    "cascadeEffects": ["..."]
+  },
+  "dataRisks": [
+    { "description": "...", "severity": "critical|high|medium|low" }
+  ],
+  "rollbacks": [
+    { "description": "...", "sql": "...", "safetyLevel": "safe|manual_review|destructive" }
+  ],
+  "score": 7,
+  "explanation": "<2-3 sentences explaining the score>",
+  "suggestions": ["<actionable suggestion 1>"],
+  "confidence": {
+    "overall":            { "confidenceScore": 62, "confidenceReason": "..." },
+    "schemaImpact":       { "confidenceScore": 90, "confidenceReason": "..." },
+    "appDependencies":    { "confidenceScore": 55, "confidenceReason": "..." },
+    "dataIntegrityRisks": { "confidenceScore": 40, "confidenceReason": "..." },
+    "documentationDrift": { "confidenceScore": 70, "confidenceReason": "..." }
+  }
 }`;
 
     const user = `SQL: ${parsed.rawSql}
+Database type: ${dbType}
 ${schemaContext}
-Schema available: ${schemaAvailable}`;
+
+App dependencies found: ${deps.length} files (Critical: ${deps.filter(d => d.severity === 'critical').length})
+Files scanned: ${context.filesScanned} of ~${context.totalFilesEst}
+Documentation drift: ${docs.length} tables undocumented
+Table sizes: ${rowInfo || 'none available'}`;
 
     try {
-      const raw   = await this.ai.ask(system, user, 512);
-      const json  = this.extractJson(raw);
-      const data  = JSON.parse(json) as {
-        breakingChanges:    string[];
-        nonBreakingChanges: string[];
-        cascadeEffects:     string[];
-        confidenceScore:    number;
-        confidenceReason:   string;
-      };
+      const raw  = await this.ai.ask(system, user, 2048);
+      const json = this.extractJson(raw);
+      const d    = JSON.parse(json);
+
       return {
-        impact: {
-          breakingChanges:    data.breakingChanges    ?? [],
-          nonBreakingChanges: data.nonBreakingChanges ?? [],
-          cascadeEffects:     data.cascadeEffects     ?? [],
+        schemaImpact: {
+          breakingChanges: d.schemaImpact?.breakingChanges || [],
+          nonBreakingChanges: d.schemaImpact?.nonBreakingChanges || [],
+          cascadeEffects: d.schemaImpact?.cascadeEffects || []
         },
+        dataRisks: (d.dataRisks || []).map((r: any) => ({
+          description: r.description,
+          severity: this.normalizeRiskLevel(r.severity)
+        })),
+        rollbacks: (d.rollbacks || []).map((r: any) => ({
+          description: r.description,
+          sql: r.sql,
+          safetyLevel: ['safe', 'manual_review', 'destructive'].includes(r.safetyLevel) ? r.safetyLevel : 'manual_review'
+        })),
+        score: Math.min(Math.max(Math.round(d.score ?? 5), 1), 10),
+        explanation: d.explanation ?? '',
+        suggestions: d.suggestions ?? [],
         confidence: {
-          confidenceScore:  data.confidenceScore  ?? 50,
-          confidenceReason: data.confidenceReason ?? '',
-        },
+          overall: d.confidence?.overall ?? UNAVAILABLE,
+          schemaImpact: d.confidence?.schemaImpact ?? UNAVAILABLE,
+          appDependencies: d.confidence?.appDependencies ?? UNAVAILABLE,
+          dataIntegrityRisks: d.confidence?.dataIntegrityRisks ?? UNAVAILABLE,
+          documentationDrift: d.confidence?.documentationDrift ?? UNAVAILABLE,
+        }
       };
     } catch (err) {
-      this.logger.warn(`analyzeSchemaImpact AI error: ${err}`);
+      this.logger.warn(`Consolidated AI error: ${err}`);
+      let score = Math.min(deps.filter(d => d.severity === 'critical').length, 2);
       return {
-        impact:     { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
-        confidence: UNAVAILABLE,
+        schemaImpact: { breakingChanges: [], nonBreakingChanges: [], cascadeEffects: [] },
+        dataRisks: [],
+        rollbacks: [{ description: 'AI unavailable', sql: '-- Configure credentials', safetyLevel: 'manual_review' }],
+        score: Math.min(Math.max(Math.round(score || 1), 1), 10),
+        explanation: 'AI unavailable — score computed from rule-based heuristics.',
+        suggestions: [],
+        confidence: { overall: UNAVAILABLE, schemaImpact: UNAVAILABLE, appDependencies: UNAVAILABLE, dataIntegrityRisks: UNAVAILABLE, documentationDrift: UNAVAILABLE }
       };
     }
   }
@@ -298,67 +376,6 @@ Severity guide: critical=DELETE/DROP/TRUNCATE, high=UPDATE/INSERT, medium=SELECT
   }
 
   // ──────────────────────────────────────────────
-  // Dimension 3: AI Data Integrity Risks
-  // ──────────────────────────────────────────────
-
-  private async assessDataIntegrityRisks(
-    parsed: Awaited<ReturnType<typeof parseSqlAI>>,
-    activeSchema: { getTable(name: string): TableDefinition | null }
-  ): Promise<{ risks: DataIntegrityRisk[]; confidence: DimensionConfidence }> {
-    const rowCountContext = parsed.tables
-      .map(t => {
-        const tbl = activeSchema.getTable(t);
-        return tbl?.rowCount !== undefined ? `${t}=${tbl.rowCount.toLocaleString()} rows` : `${t}=row count unknown`;
-      })
-      .join(', ');
-
-    const config  = vscode.workspace.getConfiguration('dbscope');
-    const dbType  = config.get<string>('dbType', 'postgresql');
-
-    const system = `You are a database reliability engineer specializing in migration safety.
-Identify ALL data integrity risks in the given SQL statement.
-Consider: missing WHERE clauses, lock escalation on large tables, foreign key violations,
-constraint failures on existing data, irreversible operations, and transaction size risks.
-Score your confidence (0-100) based on how much runtime context was provided
-(row counts, FK graph, database version, database type).
-Return ONLY valid JSON with no extra text or markdown fences:
-{
-  "risks": [
-    { "description": "<risk description>", "severity": "critical|high|medium|low" }
-  ],
-  "confidenceScore": 70,
-  "confidenceReason": "<what context was available or missing>"
-}`;
-
-    const user = `SQL: ${parsed.rawSql}
-Database type: ${dbType}
-Table row counts: ${rowCountContext || 'none available'}`;
-
-    try {
-      const raw  = await this.ai.ask(system, user, 768);
-      const json = this.extractJson(raw);
-      const data = JSON.parse(json) as {
-        risks:            { description: string; severity: string }[];
-        confidenceScore:  number;
-        confidenceReason: string;
-      };
-      return {
-        risks: (data.risks ?? []).map(r => ({
-          description: r.description,
-          severity:    this.normalizeRiskLevel(r.severity),
-        })),
-        confidence: {
-          confidenceScore:  data.confidenceScore  ?? 50,
-          confidenceReason: data.confidenceReason ?? '',
-        },
-      };
-    } catch (err) {
-      this.logger.warn(`assessDataIntegrityRisks AI error: ${err}`);
-      return { risks: [], confidence: UNAVAILABLE };
-    }
-  }
-
-  // ──────────────────────────────────────────────
   // Dimension 4: Documentation Drift (kept as I/O scan, AI classifies confidence)
   // ──────────────────────────────────────────────
 
@@ -390,186 +407,6 @@ Table row counts: ${rowCountContext || 'none available'}`;
     }
 
     return drifts.slice(0, 20);
-  }
-
-  // ──────────────────────────────────────────────
-  // AI Risk Score + Explanation + All 5 Confidence Scores (single Granite call)
-  // ──────────────────────────────────────────────
-
-  private async calculateRiskScore(
-    schema:   SchemaImpact,
-    deps:     AppDependency[],
-    data:     DataIntegrityRisk[],
-    docs:     DocumentationDrift[],
-    tables:   string[],
-    context:  {
-      filesScanned:   number;
-      totalFilesEst:  number;
-      schemaLoaded:   boolean;
-      rowCountsKnown: boolean;
-      docFilesFound:  boolean;
-    },
-    activeSchema: { getTable(name: string): TableDefinition | null }
-  ): Promise<{
-    score:       number;
-    explanation: string;
-    suggestions: string[];
-    confidence:  AnalysisConfidence;
-  }> {
-    const rowInfo = tables.map(t => {
-      const tbl = activeSchema.getTable(t);
-      return tbl?.rowCount !== undefined ? `${t}: ${tbl.rowCount.toLocaleString()} rows` : `${t}: row count unknown`;
-    }).join('; ');
-
-    const system = `You are a senior DBA and migration risk expert.
-Given the full analysis results for a SQL migration, score the overall risk and
-provide per-dimension confidence scores reflecting how much context was available.
-Score risk from 1 (trivial) to 10 (catastrophic).
-Score each confidence from 0 (no context at all) to 100 (complete context).
-Also provide up to 3 actionable suggestions for the developer.
-Return ONLY valid JSON with no extra text or markdown fences:
-{
-  "score": 7,
-  "explanation": "<2-3 sentence plain-English explanation of why this score>",
-  "suggestions": ["<actionable suggestion 1>", "<actionable suggestion 2>"],
-  "confidence": {
-    "overall":            { "confidenceScore": 62, "confidenceReason": "<reason>" },
-    "schemaImpact":       { "confidenceScore": 90, "confidenceReason": "<reason>" },
-    "appDependencies":    { "confidenceScore": 55, "confidenceReason": "<reason>" },
-    "dataIntegrityRisks": { "confidenceScore": 40, "confidenceReason": "<reason>" },
-    "documentationDrift": { "confidenceScore": 70, "confidenceReason": "<reason>" }
-  }
-}`;
-
-    const user = `SQL migration analysis:
-
-Breaking schema changes: ${schema.breakingChanges.length > 0 ? schema.breakingChanges.join('; ') : 'none'}
-Non-breaking schema changes: ${schema.nonBreakingChanges.length > 0 ? schema.nonBreakingChanges.join('; ') : 'none'}
-Cascade effects: ${schema.cascadeEffects.length > 0 ? schema.cascadeEffects.join('; ') : 'none'}
-
-App dependencies found: ${deps.length} files
-  Critical: ${deps.filter(d => d.severity === 'critical').length}
-  High:     ${deps.filter(d => d.severity === 'high').length}
-  Medium:   ${deps.filter(d => d.severity === 'medium').length}
-Files scanned: ${context.filesScanned} of ~${context.totalFilesEst} total
-
-Data integrity risks: ${data.length > 0 ? data.map(r => `[${r.severity}] ${r.description}`).join('; ') : 'none'}
-
-Documentation drift: ${docs.length} tables undocumented
-
-Table sizes: ${rowInfo || 'none available'}
-Schema loaded: ${context.schemaLoaded}
-Row counts known: ${context.rowCountsKnown}
-Documentation files found: ${context.docFilesFound}`;
-
-    try {
-      const raw  = await this.ai.ask(system, user, 1024);
-      const json = this.extractJson(raw);
-      const d    = JSON.parse(json) as {
-        score:       number;
-        explanation: string;
-        suggestions: string[];
-        confidence: {
-          overall:            { confidenceScore: number; confidenceReason: string };
-          schemaImpact:       { confidenceScore: number; confidenceReason: string };
-          appDependencies:    { confidenceScore: number; confidenceReason: string };
-          dataIntegrityRisks: { confidenceScore: number; confidenceReason: string };
-          documentationDrift: { confidenceScore: number; confidenceReason: string };
-        };
-      };
-
-      return {
-        score:       Math.min(Math.max(Math.round(d.score ?? 5), 1), 10),
-        explanation: d.explanation ?? '',
-        suggestions: d.suggestions ?? [],
-        confidence: {
-          overall:            d.confidence?.overall            ?? UNAVAILABLE,
-          schemaImpact:       d.confidence?.schemaImpact       ?? UNAVAILABLE,
-          appDependencies:    d.confidence?.appDependencies     ?? UNAVAILABLE,
-          dataIntegrityRisks: d.confidence?.dataIntegrityRisks ?? UNAVAILABLE,
-          documentationDrift: d.confidence?.documentationDrift ?? UNAVAILABLE,
-        },
-      };
-    } catch (err) {
-      this.logger.warn(`calculateRiskScore AI error: ${err}`);
-      // Arithmetic fallback so the tool still works without credentials
-      let score = 0;
-      score += Math.min(schema.breakingChanges.length * 2, 4);
-      score += Math.min(schema.cascadeEffects.length * 0.5, 1);
-      score += Math.min(deps.filter(d => d.severity === 'critical').length, 2);
-      score += Math.min(data.filter(r => r.severity === 'critical').length * 2, 2);
-      score += Math.min(data.filter(r => r.severity === 'high').length, 1);
-      return {
-        score:       Math.min(Math.max(Math.round(score), 1), 10),
-        explanation: 'AI unavailable — score computed from rule-based heuristics.',
-        suggestions: [],
-        confidence: {
-          overall:            UNAVAILABLE,
-          schemaImpact:       UNAVAILABLE,
-          appDependencies:    UNAVAILABLE,
-          dataIntegrityRisks: UNAVAILABLE,
-          documentationDrift: UNAVAILABLE,
-        },
-      };
-    }
-  }
-
-  // ──────────────────────────────────────────────
-  // AI Rollback SQL Generator
-  // ──────────────────────────────────────────────
-
-  private async buildRollbackSuggestions(
-    parsed: Awaited<ReturnType<typeof parseSqlAI>>,
-    activeSchema: { getTable(name: string): TableDefinition | null }
-  ): Promise<RollbackSuggestion[]> {
-    const config  = vscode.workspace.getConfiguration('dbscope');
-    const dbType  = config.get<string>('dbType', 'postgresql');
-    const schemaContext = this.buildSchemaContext(parsed.tables, activeSchema);
-
-    const system = `You are a database migration engineer specializing in rollback strategies.
-Write the exact SQL to UNDO the given migration statement.
-Consider the database type and any schema context provided.
-For each rollback, assign a safety level:
-  "safe"           — can be run automatically with no data risk
-  "manual_review"  — needs a human to verify before running
-  "destructive"    — data was lost; a point-in-time backup is required
-If no rollback is possible (e.g. DELETE / TRUNCATE), explain why and set safetyLevel to "destructive".
-Return ONLY valid JSON with no extra text or markdown fences:
-{
-  "rollbacks": [
-    {
-      "description": "<what this rollback does>",
-      "sql": "<ready-to-run SQL>",
-      "safetyLevel": "safe|manual_review|destructive"
-    }
-  ]
-}`;
-
-    const user = `Migration SQL: ${parsed.rawSql}
-Database type: ${dbType}
-${schemaContext}`;
-
-    try {
-      const raw  = await this.ai.ask(system, user, 768);
-      const json = this.extractJson(raw);
-      const data = JSON.parse(json) as {
-        rollbacks: { description: string; sql: string; safetyLevel: string }[];
-      };
-      return (data.rollbacks ?? []).map(r => ({
-        description: r.description,
-        sql:         r.sql,
-        safetyLevel: (r.safetyLevel === 'safe' || r.safetyLevel === 'manual_review' || r.safetyLevel === 'destructive')
-          ? r.safetyLevel
-          : 'manual_review',
-      }));
-    } catch (err) {
-      this.logger.warn(`buildRollbackSuggestions AI error: ${err}`);
-      return [{
-        description: 'Rollback generation unavailable — AI credentials not configured',
-        sql:         '-- Configure dbscope.watsonxApiKey to enable AI-powered rollback generation',
-        safetyLevel: 'manual_review',
-      }];
-    }
   }
 
   // ──────────────────────────────────────────────
