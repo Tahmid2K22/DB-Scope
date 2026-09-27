@@ -1,0 +1,7 @@
+node_modules/
+out/
+to-do/
+BOB_INSTRUCTIONS.md
+*.log
+.DS_Store
+*.vsix
