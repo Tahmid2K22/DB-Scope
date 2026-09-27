@@ -49,7 +49,7 @@ graph TD
     
     C -->|Pruned Schema + SQL| E[watsonx Granite AI]
     
-    subgraph Member 1: AI Blast Radius Analyzer
+    subgraph M1 [Member 1: AI Blast Radius Analyzer]
     E -->|Consolidated Prompt| F(Schema Impact)
     E -->|Consolidated Prompt| G(Data Risks)
     E -->|Consolidated Prompt| H(Risk Score)
