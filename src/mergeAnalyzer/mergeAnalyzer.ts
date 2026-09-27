@@ -3,6 +3,8 @@
 // Detects structural conflicts when merging two database schemas.
 // Identifies type mismatches, name conflicts, nullable differences,
 // and missing tables/columns. Suggests reconciliation SQL.
+// Optionally enriches results via IBM Bob Shell for repository-level
+// semantic reasoning (rename detection, affected files/symbols, etc.).
 
 import * as vscode from 'vscode';
 import {
@@ -14,6 +16,14 @@ import {
 } from '../core/types';
 import { SchemaStateMap } from '../core/schemaStateMap';
 import { Logger } from '../utils/logger';
+import {
+  filterSemanticallyRelevant,
+  buildBobPrompt,
+  invokeBobForMergeAnalysis,
+  conflictId,
+  BobConflictResolution,
+} from './bobBridge';
+import { BobResolutionSummary } from '../core/types';
 
 export class MergeAnalyzer {
   private readonly logger = Logger.getInstance();
@@ -43,7 +53,16 @@ export class MergeAnalyzer {
     const schemaA = this.parseSchemaFile(docA.getText(), 'Database_A');
     const schemaB = this.parseSchemaFile(docB.getText(), 'Database_B');
 
-    return this.analyze(schemaA, schemaB);
+    // Run deterministic analysis first — this always succeeds regardless of Bob
+    const deterministicResult = this.analyze(schemaA, schemaB);
+
+    // Attempt Bob enrichment only when there are conflicts worth reasoning about
+    const semanticConflicts = filterSemanticallyRelevant(deterministicResult.conflicts);
+    if (semanticConflicts.length === 0) {
+      return deterministicResult;
+    }
+
+    return this.enrichWithBob(deterministicResult, semanticConflicts);
   }
 
   /**
@@ -103,6 +122,123 @@ export class MergeAnalyzer {
       unifiedSchema,
       mergedAt: Date.now(),
     };
+  }
+
+  // ──────────────────────────────────────────────
+  // Bob enrichment — wraps deterministic result with
+  // repository-level semantic analysis from Bob Shell.
+  // Gracefully degrades: if Bob is unavailable or fails,
+  // the original deterministicResult is returned unchanged.
+  // ──────────────────────────────────────────────
+
+  private async enrichWithBob(
+    base: MergeAnalysisResult,
+    semanticConflicts: MergeConflict[],
+  ): Promise<MergeAnalysisResult> {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+      this.logger.warn('MergeAnalyzer: no workspace folder — skipping Bob enrichment');
+      return base;
+    }
+
+    const prompt = buildBobPrompt(workspaceRoot, semanticConflicts, base.schemaA, base.schemaB);
+
+    let bobResult;
+    try {
+      bobResult = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'DB-Scope: Bob is analyzing repository references...',
+          cancellable: false,
+        },
+        () => invokeBobForMergeAnalysis(prompt, workspaceRoot),
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error('MergeAnalyzer: Bob invocation threw unexpectedly', err);
+      vscode.window.showWarningMessage(
+        `DB-Scope: Unexpected error during Bob analysis (${msg}). Deterministic results preserved.`,
+      );
+      return base;
+    }
+
+    if (!bobResult.available) {
+      this.logger.warn(`MergeAnalyzer: Bob unavailable — ${bobResult.error}`);
+      vscode.window.showInformationMessage(
+        'DB-Scope: IBM Bob Shell was not found. ' +
+        'Deterministic schema analysis complete; repository-level semantic analysis was skipped.',
+      );
+      return base;
+    }
+
+    if (bobResult.error) {
+      this.logger.warn(`MergeAnalyzer: Bob error — ${bobResult.error}`);
+      vscode.window.showWarningMessage(`DB-Scope: ${bobResult.error}`);
+      // Return base — do NOT crash if Bob had a partial failure
+      if (bobResult.resolutions.length === 0) { return base; }
+    }
+
+    // Merge Bob's resolutions into the deterministic conflict list
+    const enrichedConflicts = this.applyBobResolutions(base.conflicts, bobResult.resolutions);
+
+    // Regenerate reconciled SQL with enriched conflict suggestions
+    const enrichedSql = this.generateReconciledSql(enrichedConflicts, base.unifiedSchema);
+
+    this.logger.info(
+      `MergeAnalyzer: Bob enriched ${bobResult.resolutions.length} of ${semanticConflicts.length} semantic conflict(s)`,
+    );
+
+    return {
+      ...base,
+      conflicts: enrichedConflicts,
+      reconciledSql: enrichedSql,
+      bobResolutions: bobResult.resolutions as BobResolutionSummary[],
+    };
+  }
+
+  /**
+   * Merges Bob's resolution objects back into the deterministic MergeConflict list.
+   * For each conflict that Bob resolved, the suggestion is replaced with Bob's reason
+   * and migration plan, and the reconciliation SQL is annotated.
+   * All conflicts not covered by Bob are returned unchanged.
+   */
+  private applyBobResolutions(
+    conflicts: MergeConflict[],
+    resolutions: BobConflictResolution[],
+  ): MergeConflict[] {
+    // Index resolutions by conflictId for O(1) lookup
+    const byId = new Map<string, BobConflictResolution>();
+    for (const r of resolutions) {
+      byId.set(r.conflictId, r);
+    }
+
+    return conflicts.map(conflict => {
+      const id = conflictId(conflict);
+      const r = byId.get(id);
+      if (!r) { return conflict; }
+
+      // Build a richer suggestion from Bob's analysis
+      const confidencePct = Math.round(r.confidence * 100);
+      const affectedSummary = r.affectedFiles.length > 0
+        ? ` Affects ${r.affectedFiles.length} file(s): ${r.affectedFiles.slice(0, 3).map(f => f.path).join(', ')}${r.affectedFiles.length > 3 ? '...' : ''}.`
+        : '';
+      const migrationSummary = r.migrationPlan.length > 0
+        ? `\n-- Migration: ${r.migrationPlan.join(' → ')}`
+        : '';
+
+      const enrichedSuggestion =
+        `[Bob ${confidencePct}% confidence — ${r.resolution}] ${r.reason}${affectedSummary}`;
+
+      // Annotate reconciliation SQL with Bob's migration plan
+      const enrichedSql =
+        `${migrationSummary}\n${conflict.reconciliationSql}`.trimStart();
+
+      return {
+        ...conflict,
+        suggestion: enrichedSuggestion,
+        reconciliationSql: enrichedSql,
+      };
+    });
   }
 
   // ──────────────────────────────────────────────

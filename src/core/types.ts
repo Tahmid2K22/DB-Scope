@@ -161,6 +161,19 @@ export interface MergeConflict {
   reconciliationSql: string;
 }
 
+export interface BobResolutionSummary {
+  conflictId: string;
+  resolution: string;
+  confidence: number;
+  reason: string;
+  affectedFiles: { path: string; reason: string }[];
+  affectedSymbols: { name: string; kind: string; file: string }[];
+  migrationPlan: string[];
+  applicationChanges: string[];
+  testsToUpdate: string[];
+  risks: string[];
+}
+
 export interface MergeAnalysisResult {
   schemaA: DatabaseSchema;
   schemaB: DatabaseSchema;
@@ -168,4 +181,6 @@ export interface MergeAnalysisResult {
   reconciledSql: string;
   unifiedSchema: DatabaseSchema;
   mergedAt: number;
+  /** Present when IBM Bob Shell successfully enriched the analysis. */
+  bobResolutions?: BobResolutionSummary[];
 }
