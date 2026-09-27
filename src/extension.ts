@@ -10,6 +10,7 @@ import { MergeAnalyzer } from './mergeAnalyzer/mergeAnalyzer';
 import { DashboardPanel } from './dashboard/dashboardPanel';
 import { SchemaStateMap } from './core/schemaStateMap';
 import { Logger } from './utils/logger';
+import { SqlCodeActionProvider } from './diagnostics/sqlCodeActionProvider';
 
 export async function activate(context: vscode.ExtensionContext) {
   const logger = Logger.getInstance();
@@ -18,8 +19,16 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize core schema state
   const schemaState = new SchemaStateMap(context);
 
+  // Status bar item — created before ContextManager so it can be injected
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBar.text = '$(database) DB-Scope';
+  statusBar.tooltip = 'DB-Scope: Click to open dashboard';
+  statusBar.command = 'dbscope.openDashboard';
+  statusBar.show();
+  context.subscriptions.push(statusBar);
+
   // Initialize providers
-  const contextManager = new ContextManager(schemaState, context);
+  const contextManager = new ContextManager(schemaState, context, statusBar);
   const blastRadiusAnalyzer = new BlastRadiusAnalyzer(schemaState);
   const diagnosticProvider = new SqlDiagnosticProvider(schemaState, contextManager);
   const duplicateDetector = new DuplicateDetector(schemaState);
@@ -38,6 +47,16 @@ export async function activate(context: vscode.ExtensionContext) {
   const diagnosticCollection = vscode.languages.createDiagnosticCollection('dbscope');
   context.subscriptions.push(diagnosticCollection);
   diagnosticProvider.register(diagnosticCollection, context);
+
+  // Register code action provider (quick fixes)
+  const codeActionProvider = new SqlCodeActionProvider(schemaState);
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      [{ language: 'sql' }],
+      codeActionProvider,
+      SqlCodeActionProvider.metadata
+    )
+  );
 
   // Auto-fetch context if enabled
   const config = vscode.workspace.getConfiguration('dbscope');
@@ -119,14 +138,6 @@ export async function activate(context: vscode.ExtensionContext) {
       });
     })
   );
-
-  // Status bar item
-  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusBar.text = '$(database) DB-Scope';
-  statusBar.tooltip = 'DB-Scope: Click to open dashboard';
-  statusBar.command = 'dbscope.openDashboard';
-  statusBar.show();
-  context.subscriptions.push(statusBar);
 
   logger.info('DB-Scope extension activated successfully.');
 }

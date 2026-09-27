@@ -1,14 +1,32 @@
 // src/contextManager/contextManager.ts
 // Member 2 — Context Manager
-// Automatically fetches database schema context from the codebase.
-// Updates context whenever a SQL query is written or a file is saved.
-// No manual refresh needed.
+// Fetches database schema from codebase (SQL migrations, Prisma, Django, TypeORM)
+// and optionally from a live database connection. Merges both sources.
+// Updates context automatically on file save and exposes a rich status bar.
 
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { SchemaStateMap } from '../core/schemaStateMap';
-import { DatabaseSchema, TableDefinition, ColumnDefinition } from '../core/types';
+import { DatabaseSchema } from '../core/types';
 import { Logger } from '../utils/logger';
+import { createAdapter } from '../core/dbAdapters';
+import {
+  MutableSchema,
+  parseSqlScript,
+  parsePrismaSchema,
+  parseDjangoModels,
+  parseTypeOrmEntities,
+  mergeInto,
+  mergeSchemas,
+} from './schemaParsers';
+
+type StatusState = 'idle' | 'scanning' | 'ready' | 'degraded' | 'error';
+interface StatusDetail {
+  count?: number;
+  source?: 'live' | 'codebase';
+  reason?: string;
+  message?: string;
+}
 
 export class ContextManager {
   private readonly logger = Logger.getInstance();
@@ -18,10 +36,19 @@ export class ContextManager {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly DEBOUNCE_MS = 500;
 
+  // Timeouts for live DB fetch
+  private readonly CONNECT_TIMEOUT_MS = 5_000;
+  private readonly EXTRACT_TIMEOUT_MS = 30_000;
+
+  // Injected status bar item (from extension.ts)
+  private statusBarItem: vscode.StatusBarItem | null = null;
+
   constructor(
     private readonly schemaState: SchemaStateMap,
-    private readonly extensionContext: vscode.ExtensionContext
+    private readonly extensionContext: vscode.ExtensionContext,
+    statusBarItem?: vscode.StatusBarItem
   ) {
+    if (statusBarItem) { this.statusBarItem = statusBarItem; }
     this.registerListeners();
   }
 
@@ -31,7 +58,7 @@ export class ContextManager {
 
   /**
    * Scans the entire workspace for schema definitions (migrations, ORM models,
-   * SQL files, Prisma schemas) and builds/updates the SchemaStateMap.
+   * SQL files, Prisma schemas) and optionally merges with a live DB schema.
    */
   async fetchFromCodebase(): Promise<void> {
     if (this.isFetching) {
@@ -39,20 +66,141 @@ export class ContextManager {
       return;
     }
     this.isFetching = true;
-    this.updateStatusBar('$(sync~spin) DB-Scope: Fetching context...');
+    this.setStatus('scanning');
 
     try {
       this.logger.info('ContextManager: starting codebase scan');
-      const schema = await this.scanCodebase();
-      await this.schemaState.updateSchema(schema);
-      this.logger.info(`ContextManager: schema updated — ${Object.keys(schema.tables).length} tables found`);
-      this.updateStatusBar('$(database) DB-Scope: Ready');
+      const [codebase, liveResult] = await Promise.all([
+        this.scanCodebase(),
+        this.fetchLiveSchema(),
+      ]);
+      codebase.source = 'codebase';
+
+      const finalSchema = liveResult.schema
+        ? mergeSchemas(liveResult.schema, codebase)
+        : codebase;
+
+      await this.schemaState.updateSchema(finalSchema);
+      const count = Object.keys(finalSchema.tables).length;
+      this.logger.info(`ContextManager: schema updated — ${count} tables`);
+
+      if (liveResult.schema) {
+        this.setStatus('ready', { count, source: 'live' });
+      } else if (liveResult.error) {
+        this.setStatus('degraded', { count, reason: liveResult.error });
+      } else {
+        this.setStatus('ready', { count, source: 'codebase' });
+      }
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       this.logger.error('ContextManager: fetch failed', err);
-      this.updateStatusBar('$(warning) DB-Scope: Context fetch failed');
+      this.setStatus('error', { message });
     } finally {
       this.isFetching = false;
     }
+  }
+
+  // ──────────────────────────────────────────────
+  // Status Bar
+  // ──────────────────────────────────────────────
+
+  private setStatus(state: StatusState, detail?: StatusDetail): void {
+    if (!this.statusBarItem) { return; }
+    const item = this.statusBarItem;
+    try {
+      switch (state) {
+        case 'idle':
+          item.text = '$(database) DB-Scope';
+          item.tooltip = 'DB-Scope: Click to open dashboard';
+          item.command = 'dbscope.openDashboard';
+          item.backgroundColor = undefined;
+          break;
+        case 'scanning':
+          item.text = '$(sync~spin) DB-Scope: Scanning…';
+          item.tooltip = 'DB-Scope: scanning workspace for schema context';
+          item.command = undefined;
+          item.backgroundColor = undefined;
+          break;
+        case 'ready': {
+          const n = detail?.count ?? 0;
+          const src = detail?.source ?? 'codebase';
+          item.text = `$(database) DB-Scope: ${n} tables`;
+          item.tooltip = src === 'live'
+            ? `DB-Scope: ${n} tables from live database. Click to open dashboard`
+            : `DB-Scope: ${n} tables from codebase scan. Click to open dashboard`;
+          item.command = 'dbscope.openDashboard';
+          item.backgroundColor = undefined;
+          break;
+        }
+        case 'degraded': {
+          const n = detail?.count ?? 0;
+          const reason = detail?.reason ?? 'DB unreachable';
+          item.text = `$(warning) DB-Scope: ${n} tables (offline)`;
+          item.tooltip = `DB-Scope: database unreachable (${reason}) — using codebase scan. Click to retry`;
+          item.command = 'dbscope.fetchContext';
+          item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+          break;
+        }
+        case 'error': {
+          const msg = detail?.message ?? 'Unknown error';
+          item.text = '$(error) DB-Scope: fetch failed';
+          item.tooltip = `DB-Scope: ${msg}. Click to retry`;
+          item.command = 'dbscope.fetchContext';
+          item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+          break;
+        }
+      }
+    } catch {
+      // Status bar may have been disposed
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // Live DB Fetch
+  // ──────────────────────────────────────────────
+
+  private async fetchLiveSchema(): Promise<{ schema: DatabaseSchema | null; error?: string }> {
+    const cfg = vscode.workspace.getConfiguration('dbscope');
+    const connectionString = (cfg.get<string>('connectionString') ?? '').trim();
+    const dbType = (cfg.get<string>('dbType') ?? 'postgresql') as DatabaseSchema['dbType'];
+    if (!connectionString) {
+      this.logger.info('ContextManager: no dbscope.connectionString — skipping live fetch');
+      return { schema: null };
+    }
+
+    // Redact password in log messages
+    const safeCs = connectionString.replace(/:\/\/[^@]*@/, '://***@');
+    this.logger.info(`ContextManager: connecting to ${dbType} at ${safeCs}`);
+
+    const adapter = createAdapter({ dbType, connectionString });
+    try {
+      const ok = await this.withTimeout(adapter.testConnection(), this.CONNECT_TIMEOUT_MS, 'testConnection');
+      if (!ok) {
+        this.logger.warn(`ContextManager: ${dbType} connection test failed`);
+        return { schema: null, error: `${dbType} unreachable` };
+      }
+      const schema = await this.withTimeout(
+        adapter.extractSchema(vscode.workspace.name ?? 'unknown'),
+        this.EXTRACT_TIMEOUT_MS,
+        'extractSchema'
+      );
+      schema.source = 'live';
+      return { schema };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`ContextManager: live fetch failed — ${msg}`);
+      return { schema: null, error: msg };
+    } finally {
+      await adapter.disconnect().catch(() => { /* disconnect failure is harmless */ });
+    }
+  }
+
+  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
   }
 
   // ──────────────────────────────────────────────
@@ -60,35 +208,85 @@ export class ContextManager {
   // ──────────────────────────────────────────────
 
   private async scanCodebase(): Promise<DatabaseSchema> {
-    const tables: Record<string, TableDefinition> = {};
+    const tables: MutableSchema = {};
+    const config = vscode.workspace.getConfiguration('dbscope');
 
-    // 1. Scan SQL migration files
-    const sqlFiles = await vscode.workspace.findFiles('**/*.sql', '**/node_modules/**', 100);
-    for (const file of sqlFiles) {
-      const text = (await vscode.workspace.openTextDocument(file)).getText();
-      Object.assign(tables, this.parseSqlFile(text));
+    // 1. Scan SQL migration files (sorted numerically so 0002 applies before 0010)
+    const sqlFiles = (await vscode.workspace.findFiles(
+      '**/*.sql',
+      '{**/node_modules/**,**/out/**,**/dist/**}',
+      300
+    )).map(f => f.fsPath).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+    for (const p of sqlFiles) {
+      try {
+        const text = await this.readSafe(p);
+        if (text) { mergeInto(tables, parseSqlScript(text)); }
+      } catch { /* skip unreadable files */ }
     }
 
     // 2. Scan Prisma schema files
-    const prismaFiles = await vscode.workspace.findFiles('**/schema.prisma', '**/node_modules/**', 5);
-    for (const file of prismaFiles) {
-      const text = (await vscode.workspace.openTextDocument(file)).getText();
-      Object.assign(tables, this.parsePrismaSchema(text));
-    }
-
-    // 3. Scan TypeORM / Sequelize / Django model files
-    const modelFiles = await vscode.workspace.findFiles(
-      '**/{models,entities,migrations}/**/*.{ts,js,py}',
-      '**/node_modules/**',
-      100
+    const prismaFiles = await vscode.workspace.findFiles(
+      '**/schema.prisma',
+      '{**/node_modules/**,**/out/**}',
+      5
     );
-    for (const file of modelFiles) {
-      const text = (await vscode.workspace.openTextDocument(file)).getText();
-      const lang = file.fsPath.endsWith('.py') ? 'python' : 'typescript';
-      Object.assign(tables, this.parseModelFile(text, lang));
+    for (const file of prismaFiles) {
+      try {
+        const text = await this.readSafe(file.fsPath);
+        if (text) { mergeInto(tables, parsePrismaSchema(text)); }
+      } catch { /* skip */ }
     }
 
-    const config = vscode.workspace.getConfiguration('dbscope');
+    // 3. Scan ORM model files
+    const modelFileUris = await Promise.all([
+      vscode.workspace.findFiles('**/{models,entities}/**/*.{ts,js,py}', '{**/node_modules/**,**/out/**}', 100),
+      vscode.workspace.findFiles('**/*.entity.ts', '{**/node_modules/**,**/out/**}', 50),
+      vscode.workspace.findFiles('**/models.py', '{**/node_modules/**,**/out/**}', 30),
+    ]);
+    const modelFiles = [...new Set(modelFileUris.flat().map(f => f.fsPath))];
+
+    // Two-pass for FK resolution: pass 1 collect entity table maps
+    const entityTables: Record<string, string> = {};
+    const djangoModelMap: Record<string, string> = {};
+
+    for (const p of modelFiles) {
+      try {
+        const text = await this.readSafe(p);
+        if (!text || text.length > 512 * 1024) { continue; }
+        if (p.endsWith('.py') && /models\.Model|from django\.db import models/.test(text)) {
+          // Collect Django class → table map
+          const partial = parseDjangoModels(text);
+          Object.assign(djangoModelMap, partial);
+        } else if (/\.(ts|js)$/.test(p) && /@Entity\b/.test(text)) {
+          // Collect TypeORM entity → table map
+          const ENTITY_RE = /@Entity\s*(?:\(([\s\S]*?)\))?\s*\n?\s*(?:export\s+)?(?:abstract\s+)?class\s+(\w+)/g;
+          let em: RegExpExecArray | null;
+          while ((em = ENTITY_RE.exec(text)) !== null) {
+            const args = em[1] ?? '';
+            const cls = em[2];
+            const nameM = /^['"]([^'"]+)['"]/.exec(args.trim()) ?? /name\s*:\s*['"]([^'"]+)['"]/.exec(args);
+            // Lazy import of helpers to avoid circular dep
+            const { snakeCase, pluralize } = await import('./schemaParsers');
+            entityTables[cls] = nameM ? nameM[1] : pluralize(snakeCase(cls));
+          }
+        }
+      } catch { /* skip */ }
+    }
+
+    // Pass 2: full parse with entity maps
+    for (const p of modelFiles) {
+      try {
+        const text = await this.readSafe(p);
+        if (!text || text.length > 512 * 1024) { continue; }
+        if (p.endsWith('.py') && /models\.Model|from django\.db import models/.test(text)) {
+          mergeInto(tables, parseDjangoModels(text, djangoModelMap));
+        } else if (/\.(ts|js)$/.test(p) && /@Entity\b/.test(text)) {
+          mergeInto(tables, parseTypeOrmEntities(text, entityTables));
+        }
+      } catch { /* skip */ }
+    }
+
     return {
       dbType: (config.get<string>('dbType') ?? 'postgresql') as DatabaseSchema['dbType'],
       databaseName: vscode.workspace.name ?? 'unknown',
@@ -97,134 +295,14 @@ export class ContextManager {
     };
   }
 
-  // ──────────────────────────────────────────────
-  // Parsers
-  // ──────────────────────────────────────────────
-
-  private parseSqlFile(sql: string): Record<string, TableDefinition> {
-    const tables: Record<string, TableDefinition> = {};
-    // Match CREATE TABLE statements
-    const createTableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?(\w+)["`]?\s*\(([^;]+)\)/gis;
-    let match: RegExpExecArray | null;
-
-    while ((match = createTableRegex.exec(sql)) !== null) {
-      const tableName = match[1];
-      const columnDefs = match[2];
-      const columns = this.parseColumnDefinitions(columnDefs);
-      tables[tableName] = { name: tableName, columns, indexes: [] };
+  private async readSafe(fsPath: string): Promise<string | null> {
+    try {
+      const uri = vscode.Uri.file(fsPath);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      return doc.getText();
+    } catch {
+      return null;
     }
-
-    return tables;
-  }
-
-  private parseColumnDefinitions(defs: string): Record<string, ColumnDefinition> {
-    const columns: Record<string, ColumnDefinition> = {};
-    // Split by comma (avoiding commas inside parentheses)
-    const lines = this.splitColumnDefs(defs);
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      // Skip constraint lines (PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK, INDEX)
-      if (/^\s*(PRIMARY|FOREIGN|UNIQUE|CHECK|INDEX|CONSTRAINT|KEY)/i.test(trimmed)) {
-        continue;
-      }
-      const colMatch = /["`]?(\w+)["`]?\s+(\w+(?:\([^)]+\))?)/i.exec(trimmed);
-      if (!colMatch) { continue; }
-
-      const colName = colMatch[1];
-      const colType = colMatch[2];
-      const upper = trimmed.toUpperCase();
-
-      columns[colName] = {
-        name: colName,
-        type: colType,
-        nullable: !upper.includes('NOT NULL'),
-        isPrimaryKey: upper.includes('PRIMARY KEY'),
-        isForeignKey: upper.includes('REFERENCES'),
-        referencesTable: this.extractReferences(trimmed)?.table,
-        referencesColumn: this.extractReferences(trimmed)?.column,
-      };
-    }
-
-    return columns;
-  }
-
-  private splitColumnDefs(defs: string): string[] {
-    const result: string[] = [];
-    let depth = 0;
-    let current = '';
-    for (const ch of defs) {
-      if (ch === '(') { depth++; current += ch; }
-      else if (ch === ')') { depth--; current += ch; }
-      else if (ch === ',' && depth === 0) { result.push(current); current = ''; }
-      else { current += ch; }
-    }
-    if (current.trim()) { result.push(current); }
-    return result;
-  }
-
-  private extractReferences(def: string): { table: string; column: string } | null {
-    const m = /REFERENCES\s+["`]?(\w+)["`]?\s*\(["`]?(\w+)["`]?\)/i.exec(def);
-    return m ? { table: m[1], column: m[2] } : null;
-  }
-
-  private parsePrismaSchema(content: string): Record<string, TableDefinition> {
-    const tables: Record<string, TableDefinition> = {};
-    const modelRegex = /model\s+(\w+)\s*\{([^}]+)\}/gs;
-    let match: RegExpExecArray | null;
-
-    while ((match = modelRegex.exec(content)) !== null) {
-      const modelName = match[1].toLowerCase() + 's'; // Prisma model → table name convention
-      const body = match[2];
-      const columns: Record<string, ColumnDefinition> = {};
-
-      for (const line of body.split('\n')) {
-        const fieldMatch = /^\s+(\w+)\s+(\w+)(\?)?\s*/.exec(line);
-        if (!fieldMatch) { continue; }
-        columns[fieldMatch[1]] = {
-          name: fieldMatch[1],
-          type: fieldMatch[2],
-          nullable: !!fieldMatch[3],
-          isPrimaryKey: line.includes('@id'),
-          isForeignKey: false,
-        };
-      }
-      tables[modelName] = { name: modelName, columns, indexes: [] };
-    }
-
-    return tables;
-  }
-
-  private parseModelFile(content: string, lang: 'typescript' | 'python'): Record<string, TableDefinition> {
-    const tables: Record<string, TableDefinition> = {};
-
-    if (lang === 'typescript') {
-      // TypeORM: @Entity('table_name') or @Entity()
-      const entityMatch = /@Entity\(['"]?(\w+)?['"]?\)/.exec(content);
-      if (entityMatch) {
-        const name = entityMatch[1] ?? 'unknown';
-        const columns: Record<string, ColumnDefinition> = {};
-        // @Column() fields
-        const colRegex = /@Column[^)]*\)\s+(\w+):\s+(\w+)/g;
-        let m: RegExpExecArray | null;
-        while ((m = colRegex.exec(content)) !== null) {
-          columns[m[1]] = { name: m[1], type: m[2], nullable: false, isPrimaryKey: false, isForeignKey: false };
-        }
-        tables[name] = { name, columns, indexes: [] };
-      }
-    }
-
-    if (lang === 'python') {
-      // Django models: class ModelName(models.Model)
-      const classRegex = /class\s+(\w+)\s*\(\s*models\.Model\s*\)/g;
-      let m: RegExpExecArray | null;
-      while ((m = classRegex.exec(content)) !== null) {
-        const name = m[1].toLowerCase() + 's';
-        tables[name] = { name, columns: {}, indexes: [] };
-      }
-    }
-
-    return tables;
   }
 
   // ──────────────────────────────────────────────
@@ -232,7 +310,7 @@ export class ContextManager {
   // ──────────────────────────────────────────────
 
   private registerListeners(): void {
-    // Refresh on save of any SQL/migration file
+    // Refresh on save of any SQL/migration/prisma file
     vscode.workspace.onDidSaveTextDocument(doc => {
       const ext = path.extname(doc.fileName).toLowerCase();
       if (['.sql', '.prisma'].includes(ext) || doc.fileName.includes('migration')) {
@@ -240,10 +318,18 @@ export class ContextManager {
       }
     }, null, this.extensionContext.subscriptions);
 
-    // Debounced update when user writes SQL in any file
+    // Debounced update when user writes SQL
     vscode.workspace.onDidChangeTextDocument(evt => {
       const lang = evt.document.languageId;
       if (lang === 'sql' || evt.document.fileName.endsWith('.sql')) {
+        this.debounce();
+      }
+    }, null, this.extensionContext.subscriptions);
+
+    // Re-fetch when connection config changes
+    vscode.workspace.onDidChangeConfiguration(evt => {
+      if (evt.affectsConfiguration('dbscope.connectionString') ||
+          evt.affectsConfiguration('dbscope.dbType')) {
         this.debounce();
       }
     }, null, this.extensionContext.subscriptions);
@@ -252,13 +338,5 @@ export class ContextManager {
   private debounce(): void {
     if (this.debounceTimer) { clearTimeout(this.debounceTimer); }
     this.debounceTimer = setTimeout(() => this.fetchFromCodebase(), this.DEBOUNCE_MS);
-  }
-
-  private statusBarItem: vscode.StatusBarItem | null = null;
-
-  private updateStatusBar(text: string): void {
-    // The extension.ts status bar will reflect this via the command tooltip.
-    // Emit to output channel for now; a shared status bar can be injected later.
-    this.logger.info(text);
   }
 }
