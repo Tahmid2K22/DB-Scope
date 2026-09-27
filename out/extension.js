@@ -35,7 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
-// src/extension.ts — Main entry point for DB-Scope VS Code Extension
+// src/extension.ts -- Main entry point for DB-Scope VS Code Extension
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const blastRadiusAnalyzer_1 = require("./blastRadius/blastRadiusAnalyzer");
@@ -53,7 +53,7 @@ async function activate(context) {
     logger.info('DB-Scope extension activating...');
     // Initialize core schema state
     const schemaState = new schemaStateMap_1.SchemaStateMap(context);
-    // Status bar item — created before ContextManager so it can be injected
+    // Status bar item -- created before ContextManager so it can be injected
     const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     statusBar.text = '$(database) DB-Scope';
     statusBar.tooltip = 'DB-Scope: Click to open dashboard';
@@ -81,6 +81,38 @@ async function activate(context) {
     if (config.get('autoFetchContext')) {
         contextManager.fetchFromCodebase().catch(err => logger.warn(`Auto context fetch failed: ${err.message}`));
     }
+    // --- Dashboard message handler ---
+    // Handles bidirectional communication between the webview dashboard and the extension.
+    const pushSchemaStats = async () => {
+        const panel = dashboardPanel_1.DashboardPanel.getCurrent();
+        if (!panel) {
+            return;
+        }
+        const summary = schemaState.getSchemaSummary();
+        panel.updateStats(summary);
+    };
+    const dashboardMessageHandler = async (message) => {
+        switch (message.command) {
+            case 'ready':
+                await pushSchemaStats();
+                break;
+            case 'runCommand': {
+                const commandId = message.commandId;
+                if (commandId) {
+                    await vscode.commands.executeCommand(`dbscope.${commandId}`);
+                    // After certain commands complete, refresh dashboard stats
+                    if (commandId === 'fetchContext' || commandId === 'openDashboard') {
+                        await pushSchemaStats();
+                    }
+                }
+                break;
+            }
+        }
+    };
+    // Helper to open dashboard with the message handler wired up
+    const openDashboard = (payload) => {
+        dashboardPanel_1.DashboardPanel.createOrShow(context.extensionUri, payload, dashboardMessageHandler);
+    };
     // Register commands
     context.subscriptions.push(vscode.commands.registerCommand('dbscope.analyzeBlastRadius', async () => {
         const editor = vscode.window.activeTextEditor;
@@ -90,7 +122,7 @@ async function activate(context) {
         }
         const sql = editor.document.getText(editor.selection) || editor.document.getText();
         const result = await blastRadiusAnalyzer.analyze(sql);
-        dashboardPanel_1.DashboardPanel.createOrShow(context.extensionUri, { type: 'blastRadius', data: result });
+        openDashboard({ type: 'blastRadius', data: result });
     }), vscode.commands.registerCommand('dbscope.detectDuplicates', async () => {
         const schema = await schemaState.getCurrentSchema();
         if (!schema) {
@@ -98,20 +130,22 @@ async function activate(context) {
             return;
         }
         const duplicates = duplicateDetector.detect(schema);
-        dashboardPanel_1.DashboardPanel.createOrShow(context.extensionUri, { type: 'duplicates', data: duplicates });
+        openDashboard({ type: 'duplicates', data: duplicates });
     }), vscode.commands.registerCommand('dbscope.mergeDatabases', async () => {
         const result = await mergeAnalyzer.promptAndAnalyze();
         if (result) {
-            dashboardPanel_1.DashboardPanel.createOrShow(context.extensionUri, { type: 'merge', data: result });
+            openDashboard({ type: 'merge', data: result });
         }
     }), vscode.commands.registerCommand('dbscope.fetchContext', async () => {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'DB-Scope: Fetching database context...' }, () => contextManager.fetchFromCodebase());
         vscode.window.showInformationMessage('DB-Scope: Database context updated successfully.');
+        // Push updated stats to dashboard if open
+        await pushSchemaStats();
     }), vscode.commands.registerCommand('dbscope.openDashboard', () => {
-        dashboardPanel_1.DashboardPanel.createOrShow(context.extensionUri, { type: 'overview', data: null });
+        openDashboard({ type: 'overview', data: null });
     }), vscode.commands.registerCommand('dbscope.showHistory', async () => {
         const history = await schemaState.getHistory();
-        dashboardPanel_1.DashboardPanel.createOrShow(context.extensionUri, { type: 'history', data: history });
+        openDashboard({ type: 'history', data: history });
     }), 
     // Step 8: Export last analysis result to a JSON file
     vscode.commands.registerCommand('dbscope.exportAnalysis', async () => {

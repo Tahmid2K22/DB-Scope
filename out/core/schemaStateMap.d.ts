@@ -11,6 +11,12 @@ export declare class SchemaStateMap {
     getHistory(): Promise<SchemaSnapshot[]>;
     getTable(tableName: string): TableDefinition | null;
     getAllTableNames(): string[];
+    getRelevantSchema(tableNames: string[]): DatabaseSchema | null;
+    getSchemaSummary(): {
+        tableCount: number;
+        columnCount: number;
+        lastUpdated: number | null;
+    };
     private loadFromStorage;
     private persistToStorage;
     private diffCount;

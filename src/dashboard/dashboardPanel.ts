@@ -1,9 +1,7 @@
-// src/dashboard/dashboardPanel.ts — VS Code WebView Dashboard
-// Shows blast radius, merge conflicts, duplicate detector, and schema history
-// as a rich HTML panel inside VS Code.
+// src/dashboard/dashboardPanel.ts -- VS Code WebView Dashboard
+// Interactive dashboard with navigation tabs, message passing, and polished UI.
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 import {
   BlastRadiusResult,
   MergeAnalysisResult,
@@ -19,28 +17,46 @@ export type DashboardPayload =
   | { type: 'duplicates'; data: DuplicateGroup[] }
   | { type: 'history'; data: SchemaSnapshot[] };
 
+export type DashboardMessageHandler = (message: { command: string; [key: string]: unknown }) => void;
+
 export class DashboardPanel {
   public static currentPanel: DashboardPanel | undefined;
   private readonly _panel: vscode.WebviewPanel;
   private _disposables: vscode.Disposable[] = [];
+  private _shellLoaded = false;
+  private _onMessage: DashboardMessageHandler | undefined;
 
   private constructor(
     panel: vscode.WebviewPanel,
     private readonly extensionUri: vscode.Uri,
-    payload: DashboardPayload
+    payload: DashboardPayload,
+    onMessage?: DashboardMessageHandler
   ) {
     this._panel = panel;
+    this._onMessage = onMessage;
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
-    this._update(payload);
+
+    if (onMessage) {
+      this._panel.webview.onDidReceiveMessage(onMessage, null, this._disposables);
+    }
+
+    // Load the shell first, then push the initial view
+    this._panel.webview.html = this.shellHtml();
+    this._shellLoaded = true;
+    this._pushView(payload);
   }
 
-  public static createOrShow(extensionUri: vscode.Uri, payload: DashboardPayload): void {
+  public static createOrShow(
+    extensionUri: vscode.Uri,
+    payload: DashboardPayload,
+    onMessage?: DashboardMessageHandler
+  ): void {
     const column = vscode.window.activeTextEditor
       ? vscode.ViewColumn.Beside
       : vscode.ViewColumn.One;
 
     if (DashboardPanel.currentPanel) {
-      DashboardPanel.currentPanel._update(payload);
+      DashboardPanel.currentPanel._pushView(payload);
       DashboardPanel.currentPanel._panel.reveal(column);
       return;
     }
@@ -49,15 +65,24 @@ export class DashboardPanel {
       'dbscopeDashboard',
       'DB-Scope Dashboard',
       column,
-      { enableScripts: false, retainContextWhenHidden: true }
+      { enableScripts: true, retainContextWhenHidden: true }
     );
 
-    DashboardPanel.currentPanel = new DashboardPanel(panel, extensionUri, payload);
+    DashboardPanel.currentPanel = new DashboardPanel(panel, extensionUri, payload, onMessage);
   }
 
-  private _update(payload: DashboardPayload): void {
-    this._panel.title = `DB-Scope — ${this.titleFor(payload.type)}`;
-    this._panel.webview.html = this.getHtml(payload);
+  public static getCurrent(): DashboardPanel | undefined {
+    return DashboardPanel.currentPanel;
+  }
+
+  public updateStats(stats: { tableCount: number; columnCount: number; lastUpdated: number | null }): void {
+    this._panel.webview.postMessage({ command: 'updateStats', stats });
+  }
+
+  private _pushView(payload: DashboardPayload): void {
+    this._panel.title = `DB-Scope -- ${this.titleFor(payload.type)}`;
+    const html = this.getContentHtml(payload);
+    this._panel.webview.postMessage({ command: 'setView', view: payload.type, html });
   }
 
   private titleFor(type: DashboardPayload['type']): string {
@@ -80,11 +105,11 @@ export class DashboardPanel {
     }
   }
 
-  // ──────────────────────────────────────────────
-  // HTML Generation
-  // ──────────────────────────────────────────────
+  // --------------------------------------------------
+  // Content HTML (view-specific, no page wrapper)
+  // --------------------------------------------------
 
-  private getHtml(payload: DashboardPayload): string {
+  private getContentHtml(payload: DashboardPayload): string {
     switch (payload.type) {
       case 'blastRadius': return this.blastRadiusHtml(payload.data);
       case 'merge': return this.mergeHtml(payload.data);
@@ -94,108 +119,560 @@ export class DashboardPanel {
     }
   }
 
-  private baseHtml(title: string, body: string): string {
+  // --------------------------------------------------
+  // Shell HTML (loaded once, contains CSS + JS + nav)
+  // --------------------------------------------------
+
+  private shellHtml(): string {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${this.esc(title)}</title>
+  <title>DB-Scope Dashboard</title>
   <style>
-    body { font-family: var(--vscode-font-family); background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); margin: 0; padding: 20px; }
-    h1 { font-size: 1.4em; margin-bottom: 6px; }
-    h2 { font-size: 1.1em; margin-top: 24px; margin-bottom: 8px; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 4px; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; font-weight: bold; margin-left: 8px; }
-    .critical { background: #f44; color: #fff; }
-    .high { background: #f80; color: #fff; }
-    .medium { background: #fb0; color: #000; }
-    .low { background: #4a4; color: #fff; }
+    :root {
+      --accent: #4a9eff;
+      --accent-dim: rgba(74, 158, 255, 0.15);
+      --critical: #dc3545;
+      --high: #e67700;
+      --medium: #e6a700;
+      --low: #28a745;
+      --card-bg: var(--vscode-sideBar-background, #1e1e2e);
+      --card-border: var(--vscode-panel-border, #333);
+      --text: var(--vscode-editor-foreground, #ccc);
+      --text-muted: var(--vscode-descriptionForeground, #888);
+      --bg: var(--vscode-editor-background, #181825);
+      --header-bg: var(--vscode-titleBar-activeBackground, #1a1a2e);
+      --table-alt: rgba(255, 255, 255, 0.03);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--vscode-font-family, 'Segoe UI', system-ui, sans-serif);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    /* ---- Header & Navigation ---- */
+    .header {
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--card-border);
+      border-top: 3px solid var(--accent);
+      padding: 0 20px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .header-inner {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .header-title {
+      font-size: 1.1em;
+      font-weight: 700;
+      color: var(--accent);
+      padding: 12px 0;
+      white-space: nowrap;
+      letter-spacing: 0.5px;
+    }
+    .nav-tabs {
+      display: flex;
+      gap: 0;
+      overflow-x: auto;
+    }
+    .nav-tab {
+      padding: 12px 16px;
+      font-size: 0.85em;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+      transition: color 0.15s, border-color 0.15s;
+      user-select: none;
+      background: none;
+      border-top: none;
+      border-left: none;
+      border-right: none;
+      font-family: inherit;
+    }
+    .nav-tab:hover { color: var(--text); }
+    .nav-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* ---- Main Content ---- */
+    .main {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 24px 20px 40px;
+    }
+    #content {
+      animation: fadeIn 0.2s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ---- Typography ---- */
+    h1 {
+      font-size: 1.35em;
+      margin-bottom: 8px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+    }
+    h2 {
+      font-size: 1.05em;
+      margin-top: 24px;
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--card-border);
+      font-weight: 600;
+    }
+    p { margin-bottom: 8px; }
+
+    /* ---- Cards ---- */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      font-size: 0.78em;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+    }
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    /* ---- Badges ---- */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 0.78em;
+      font-weight: 700;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .badge-critical { background: var(--critical); color: #fff; }
+    .badge-high { background: var(--high); color: #fff; }
+    .badge-medium { background: var(--medium); color: #000; }
+    .badge-low { background: var(--low); color: #fff; }
+    .badge-info { background: var(--accent); color: #fff; }
+
+    /* ---- Tags ---- */
+    .tag {
+      display: inline-block;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border-radius: 3px;
+      padding: 1px 7px;
+      font-size: 0.8em;
+      margin: 2px;
+      font-weight: 500;
+    }
+
+    /* ---- Tables ---- */
     table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--vscode-panel-border); font-size: 0.9em; }
-    th { background: var(--vscode-sideBar-background); font-weight: bold; }
-    .card { background: var(--vscode-sideBar-background); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 14px; margin-bottom: 12px; }
-    .tag { display: inline-block; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 3px; padding: 1px 6px; font-size: 0.8em; margin: 2px; }
-    pre { background: var(--vscode-textCodeBlock-background); padding: 10px; border-radius: 4px; font-size: 0.85em; overflow-x: auto; white-space: pre-wrap; }
-    .muted { opacity: 0.7; font-size: 0.85em; }
-    .score-bar { height: 8px; border-radius: 4px; background: #e0e0e0; margin-top: 6px; }
-    .score-fill { height: 8px; border-radius: 4px; }
-    ul { margin: 6px 0; padding-left: 20px; }
-    li { margin-bottom: 4px; }
-    .bob-banner { background: #0e3a5c; border: 1px solid #1a6a9a; border-radius: 4px; padding: 10px 14px; margin-bottom: 16px; color: #7dd3fc; font-size: 0.9em; }
-    .bob-banner strong { color: #bae6fd; }
-    .confidence-pill { display: inline-block; background: #1e40af; color: #bfdbfe; border-radius: 10px; padding: 1px 8px; font-size: 0.78em; font-weight: bold; margin-left: 6px; vertical-align: middle; }
-    .conflict-card { background: var(--vscode-sideBar-background); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 10px 14px; margin-bottom: 10px; }
-    .conflict-card .meta { font-size: 0.82em; color: var(--vscode-descriptionForeground, #888); margin-bottom: 6px; }
+    th, td {
+      text-align: left;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--card-border);
+      font-size: 0.88em;
+    }
+    th {
+      background: var(--card-bg);
+      font-weight: 700;
+      font-size: 0.8em;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-muted);
+    }
+    tr:nth-child(even) td { background: var(--table-alt); }
+
+    /* ---- Code ---- */
+    pre, code {
+      font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
+    }
+    pre {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      padding: 12px;
+      border-radius: 4px;
+      font-size: 0.84em;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+    code {
+      font-size: 0.92em;
+    }
+
+    /* ---- Score bar ---- */
+    .score-bar {
+      height: 8px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .score-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.4s ease;
+    }
+
+    /* ---- Buttons ---- */
+    .btn {
+      display: inline-block;
+      padding: 8px 16px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid rgba(74, 158, 255, 0.3);
+      border-radius: 4px;
+      font-size: 0.85em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      font-family: inherit;
+      margin: 4px;
+    }
+    .btn:hover {
+      background: rgba(74, 158, 255, 0.25);
+      border-color: var(--accent);
+    }
+    .btn:active {
+      background: rgba(74, 158, 255, 0.35);
+    }
+
+    /* ---- Lists ---- */
+    ul, ol { margin: 6px 0; padding-left: 22px; }
+    li { margin-bottom: 4px; font-size: 0.9em; }
+
+    /* ---- Muted text ---- */
+    .muted { color: var(--text-muted); font-size: 0.85em; }
+
+    /* ---- Bob AI Banner ---- */
+    .bob-banner {
+      background: rgba(74, 158, 255, 0.08);
+      border: 1px solid rgba(74, 158, 255, 0.25);
+      border-radius: 4px;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+      font-size: 0.9em;
+    }
+    .bob-banner strong { color: var(--accent); }
+
+    /* ---- Conflict cards ---- */
+    .conflict-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 4px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+    .conflict-card .meta {
+      font-size: 0.82em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
     .conflict-card .suggestion { margin: 6px 0 4px; }
-    .files-list { margin: 4px 0 0 0; padding-left: 18px; font-size: 0.84em; }
-    .files-list li { margin-bottom: 2px; }
-    .files-list code { font-size: 0.95em; }
-    .migration-steps { margin: 6px 0 0 0; padding-left: 20px; font-size: 0.84em; }
-    .migration-steps li { margin-bottom: 2px; }
-    .risks-list { margin: 4px 0 0 0; padding-left: 18px; font-size: 0.84em; color: #f87171; }
-    .risks-list li::marker { content: "⚠ "; }
-    .section-label { font-size: 0.78em; font-weight: bold; text-transform: uppercase; opacity: 0.6; margin: 6px 0 2px; letter-spacing: 0.04em; }
+
+    /* ---- Section label ---- */
+    .section-label {
+      font-size: 0.76em;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 8px 0 4px;
+      letter-spacing: 0.5px;
+    }
+
+    /* ---- Confidence pill ---- */
+    .confidence-pill {
+      display: inline-block;
+      background: rgba(74, 158, 255, 0.15);
+      color: var(--accent);
+      border-radius: 10px;
+      padding: 1px 8px;
+      font-size: 0.76em;
+      font-weight: 700;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    /* ---- Files & migration lists ---- */
+    .files-list, .migration-steps {
+      margin: 4px 0 0 0;
+      padding-left: 20px;
+      font-size: 0.84em;
+    }
+    .files-list li, .migration-steps li { margin-bottom: 2px; }
+    .risks-list {
+      margin: 4px 0 0 0;
+      padding-left: 20px;
+      font-size: 0.84em;
+      color: var(--critical);
+    }
+
+    /* ---- Stat values ---- */
+    .stat-value {
+      font-size: 1.8em;
+      font-weight: 700;
+      color: var(--accent);
+      line-height: 1.2;
+    }
+    .stat-label {
+      font-size: 0.82em;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .stat-row {
+      display: flex;
+      gap: 32px;
+      margin: 12px 0;
+    }
+    .stat-item { text-align: center; }
+
+    /* ---- Status indicator ---- */
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .status-dot.active { background: var(--low); }
+    .status-dot.inactive { background: var(--text-muted); }
   </style>
 </head>
 <body>
-${body}
+  <div class="header">
+    <div class="header-inner">
+      <div class="header-title">DB-Scope</div>
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-view="overview" onclick="switchTab('overview')">Overview</button>
+        <button class="nav-tab" data-view="blastRadius" onclick="switchTab('blastRadius')">Blast Radius</button>
+        <button class="nav-tab" data-view="merge" onclick="switchTab('merge')">Merge Analysis</button>
+        <button class="nav-tab" data-view="duplicates" onclick="switchTab('duplicates')">Duplicates</button>
+        <button class="nav-tab" data-view="history" onclick="switchTab('history')">Timeline</button>
+      </div>
+    </div>
+  </div>
+  <div class="main">
+    <div id="content">
+      <p class="muted">Loading dashboard...</p>
+    </div>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    let currentView = 'overview';
+
+    function switchTab(view) {
+      if (view === 'overview') {
+        // Overview is handled locally -- just tell extension to push overview data
+        vscode.postMessage({ command: 'runCommand', commandId: 'openDashboard' });
+      } else {
+        const commandMap = {
+          blastRadius: 'analyzeBlastRadius',
+          merge: 'mergeDatabases',
+          duplicates: 'detectDuplicates',
+          history: 'showHistory'
+        };
+        const cmd = commandMap[view];
+        if (cmd) {
+          vscode.postMessage({ command: 'runCommand', commandId: cmd });
+        }
+      }
+    }
+
+    function setActiveTab(view) {
+      currentView = view;
+      document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.view === view);
+      });
+    }
+
+    function runCommand(commandId) {
+      vscode.postMessage({ command: 'runCommand', commandId: commandId });
+    }
+
+    function relativeTime(timestamp) {
+      if (!timestamp) return 'Never';
+      const diff = Date.now() - timestamp;
+      const seconds = Math.floor(diff / 1000);
+      if (seconds < 60) return seconds + 's ago';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return minutes + 'm ago';
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return hours + 'h ago';
+      return Math.floor(hours / 24) + 'd ago';
+    }
+
+    window.addEventListener('message', event => {
+      const msg = event.data;
+      if (msg.command === 'setView') {
+        const el = document.getElementById('content');
+        if (el) {
+          el.style.animation = 'none';
+          el.offsetHeight; // trigger reflow
+          el.style.animation = '';
+          el.innerHTML = msg.html;
+        }
+        setActiveTab(msg.view);
+      } else if (msg.command === 'updateStats') {
+        const s = msg.stats;
+        const tcEl = document.getElementById('stat-tables');
+        const ccEl = document.getElementById('stat-columns');
+        const luEl = document.getElementById('stat-updated');
+        if (tcEl) tcEl.textContent = String(s.tableCount);
+        if (ccEl) ccEl.textContent = String(s.columnCount);
+        if (luEl) luEl.textContent = relativeTime(s.lastUpdated);
+      }
+    });
+
+    // Signal ready
+    vscode.postMessage({ command: 'ready' });
+  </script>
 </body>
 </html>`;
   }
 
+  // --------------------------------------------------
+  // View: Overview
+  // --------------------------------------------------
+
+  private overviewHtml(): string {
+    return `
+<h1>Dashboard Overview</h1>
+<p class="muted">AI-powered database lifecycle platform for VS Code.</p>
+
+<div class="card-grid">
+  <div class="card">
+    <div class="card-title">Schema Health</div>
+    <div class="stat-row">
+      <div class="stat-item">
+        <div class="stat-value" id="stat-tables">--</div>
+        <div class="stat-label">Tables</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="stat-columns">--</div>
+        <div class="stat-label">Columns</div>
+      </div>
+    </div>
+    <p class="muted">Last scan: <span id="stat-updated">--</span></p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">AI Integration</div>
+    <p><span class="status-dot active"></span> <strong>IBM watsonx.ai</strong> -- Granite 3-3-8b-instruct</p>
+    <p><span class="status-dot active"></span> <strong>IBM Bob Shell</strong> -- CLI fallback engine</p>
+    <p class="muted" style="margin-top:8px">Token-optimized context delivery active</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Quick Actions</div>
+  <button class="btn" onclick="runCommand('analyzeBlastRadius')">Analyze Blast Radius</button>
+  <button class="btn" onclick="runCommand('detectDuplicates')">Detect Duplicates</button>
+  <button class="btn" onclick="runCommand('mergeDatabases')">Merge Analysis</button>
+  <button class="btn" onclick="runCommand('fetchContext')">Fetch Context</button>
+  <button class="btn" onclick="runCommand('showHistory')">Show Timeline</button>
+</div>
+
+<div class="card">
+  <div class="card-title">Capabilities</div>
+  <ul>
+    <li><strong>Blast Radius Analysis</strong> -- 4-dimension migration impact assessment</li>
+    <li><strong>Duplicate Detection</strong> -- semantic duplicate column and table finder</li>
+    <li><strong>Merge Conflict Analysis</strong> -- cross-schema structural diff with AI enrichment</li>
+    <li><strong>Real-time Diagnostics</strong> -- SQL error detection and quick fixes</li>
+    <li><strong>Schema Timeline</strong> -- historical schema evolution tracking</li>
+  </ul>
+</div>
+
+<p class="muted">Hover over any SQL query in the editor for instant impact tooltips.</p>`;
+  }
+
+  // --------------------------------------------------
+  // View: Blast Radius
+  // --------------------------------------------------
+
   private blastRadiusHtml(r: BlastRadiusResult): string {
-    const riskColor = r.riskLevel;
+    const riskColor = `badge-${r.riskLevel}`;
     const scoreWidth = Math.round(r.riskScore * 10);
-    const scoreColor = { low: '#4a4', medium: '#fb0', high: '#f80', critical: '#f44' }[r.riskLevel];
+    const scoreColor = { low: 'var(--low)', medium: 'var(--medium)', high: 'var(--high)', critical: 'var(--critical)' }[r.riskLevel];
 
     const breaking = r.schemaImpact.breakingChanges.map(c => `<li>${this.esc(c)}</li>`).join('');
     const nonBreaking = r.schemaImpact.nonBreakingChanges.map(c => `<li>${this.esc(c)}</li>`).join('');
     const cascades = r.schemaImpact.cascadeEffects.map(c => `<li><code>${this.esc(c)}</code></li>`).join('');
     const dataRisks = r.dataIntegrityRisks.map(d =>
-      `<tr><td>${this.esc(d.description)}</td><td><span class="badge ${d.severity}">${d.severity.toUpperCase()}</span></td></tr>`
+      `<tr><td>${this.esc(d.description)}</td><td><span class="badge badge-${d.severity}">${d.severity.toUpperCase()}</span></td></tr>`
     ).join('');
     const appDeps = r.appDependencies.slice(0, 20).map(d =>
       `<tr><td><code>${this.esc(d.filePath)}:${d.lineNumber ?? ''}</code></td><td>${this.esc(d.tableName)}</td><td class="muted">${this.esc(d.usage)}</td></tr>`
     ).join('');
     const suggestions = r.suggestions.map(s => `<li>${this.esc(s)}</li>`).join('');
     const rollbacks = (r.rollbackSuggestions ?? []).map(rb => {
-      const safetyColor = rb.safetyLevel === 'safe' ? 'low' : rb.safetyLevel === 'manual_review' ? 'medium' : 'critical';
+      const safetyColor = rb.safetyLevel === 'safe' ? 'badge-low' : rb.safetyLevel === 'manual_review' ? 'badge-medium' : 'badge-critical';
       return `<tr>
         <td>${this.esc(rb.description)}</td>
         <td><span class="badge ${safetyColor}">${this.esc(rb.safetyLevel)}</span></td>
-        <td><pre style="margin:0;font-size:0.8em">${this.esc(rb.sql)}</pre></td>
+        <td><pre style="margin:0;font-size:0.82em">${this.esc(rb.sql)}</pre></td>
       </tr>`;
     }).join('');
 
-    const body = `
-<h1>💥 Blast Radius Analysis <span class="badge ${riskColor}">${riskColor.toUpperCase()} — ${r.riskScore}/10</span></h1>
+    return `
+<h1>Blast Radius Analysis <span class="badge ${riskColor}">${r.riskLevel.toUpperCase()} -- ${r.riskScore}/10</span></h1>
 <div class="score-bar"><div class="score-fill" style="width:${scoreWidth}%;background:${scoreColor}"></div></div>
-<p class="muted">Analyzed: <code>${this.esc(r.sql.slice(0, 120))}${r.sql.length > 120 ? '…' : ''}</code></p>
+<p class="muted" style="margin-top:8px">Analyzed: <code>${this.esc(r.sql.slice(0, 120))}${r.sql.length > 120 ? '...' : ''}</code></p>
 <p><strong>Affected Tables:</strong> ${r.affectedTables.map(t => `<span class="tag">${this.esc(t)}</span>`).join(' ')}</p>
 
-${breaking ? `<h2>⚠ Breaking Changes</h2><ul>${breaking}</ul>` : ''}
-${nonBreaking ? `<h2>✅ Non-Breaking Changes</h2><ul>${nonBreaking}</ul>` : ''}
-${cascades ? `<h2>🔗 Cascade Effects</h2><ul>${cascades}</ul>` : ''}
+${breaking ? `<h2>Breaking Changes</h2><ul>${breaking}</ul>` : ''}
+${nonBreaking ? `<h2>Non-Breaking Changes</h2><ul>${nonBreaking}</ul>` : ''}
+${cascades ? `<h2>Cascade Effects</h2><ul>${cascades}</ul>` : ''}
 
-${dataRisks ? `<h2>🔴 Data Integrity Risks</h2>
+${dataRisks ? `<h2>Data Integrity Risks</h2>
 <table><thead><tr><th>Risk</th><th>Severity</th></tr></thead><tbody>${dataRisks}</tbody></table>` : ''}
 
-${appDeps ? `<h2>📁 App Dependencies (${r.appDependencies.length} files)</h2>
+${appDeps ? `<h2>App Dependencies (${r.appDependencies.length} files)</h2>
 <table><thead><tr><th>File</th><th>Table</th><th>Usage</th></tr></thead><tbody>${appDeps}</tbody></table>` : ''}
 
-${r.documentationDrift.length > 0 ? `<h2>📄 Documentation Drift (${r.documentationDrift.length} issues)</h2>
-<ul>${r.documentationDrift.map(d => `<li><code>${this.esc(d.filePath)}</code> — ${this.esc(d.issue)}</li>`).join('')}</ul>` : ''}
+${r.documentationDrift.length > 0 ? `<h2>Documentation Drift (${r.documentationDrift.length} issues)</h2>
+<ul>${r.documentationDrift.map(d => `<li><code>${this.esc(d.filePath)}</code> -- ${this.esc(d.issue)}</li>`).join('')}</ul>` : ''}
 
-${suggestions ? `<h2>💡 Suggestions</h2><ul>${suggestions}</ul>` : ''}
+${suggestions ? `<h2>Suggestions</h2><ul>${suggestions}</ul>` : ''}
 
-${rollbacks ? `<h2>↩ Rollback SQL</h2>
+${rollbacks ? `<h2>Rollback SQL</h2>
 <table><thead><tr><th>Description</th><th>Safety</th><th>SQL</th></tr></thead><tbody>${rollbacks}</tbody></table>` : ''}
 `;
-    return this.baseHtml('Blast Radius Analysis', body);
   }
 
+  // --------------------------------------------------
+  // View: Merge Analysis
+  // --------------------------------------------------
+
   private mergeHtml(r: MergeAnalysisResult): string {
-    // Build a lookup map: conflictId key → BobResolutionSummary
     const bobMap = new Map<string, BobResolutionSummary>();
     for (const res of (r.bobResolutions ?? [])) {
       bobMap.set(res.conflictId, res);
@@ -203,7 +680,6 @@ ${rollbacks ? `<h2>↩ Rollback SQL</h2>
 
     const bobEnriched = bobMap.size > 0;
 
-    // Severity color per conflict type
     const severityFor = (t: string): string => {
       switch (t) {
         case 'missing_table':    return 'high';
@@ -215,51 +691,44 @@ ${rollbacks ? `<h2>↩ Rollback SQL</h2>
       }
     };
 
-    // Conflict type breakdown for header
     const typeCounts: Record<string, number> = {};
     for (const c of r.conflicts) {
       typeCounts[c.conflictType] = (typeCounts[c.conflictType] ?? 0) + 1;
     }
     const typeBreakdown = Object.entries(typeCounts)
-      .map(([t, n]) => `<span class="badge ${severityFor(t)}" style="margin-right:4px">${n} ${this.esc(t)}</span>`)
+      .map(([t, n]) => `<span class="badge badge-${severityFor(t)}" style="margin-right:4px">${n} ${this.esc(t)}</span>`)
       .join(' ');
 
-    // Bob banner
     const bobBanner = bobEnriched ? `
 <div class="bob-banner">
-  🤖 <strong>IBM Bob AI-Enhanced</strong> — ${bobMap.size} conflict${bobMap.size !== 1 ? 's' : ''} analyzed by IBM Bob Shell.
+  <strong>IBM Bob AI-Enhanced</strong> -- ${bobMap.size} conflict${bobMap.size !== 1 ? 's' : ''} analyzed by IBM Bob Shell.
   Confidence scores, affected files, and migration steps are sourced from Bob's repository-level analysis.
 </div>` : '';
 
-    // Per-conflict cards
-    const conflictId = (c: { conflictType: string; table: string; column?: string }) =>
+    const conflictIdFn = (c: { conflictType: string; table: string; column?: string }) =>
       c.column ? `${c.conflictType}::${c.table}::${c.column}` : `${c.conflictType}::${c.table}`;
 
     const conflictCards = r.conflicts.map(c => {
-      const id = conflictId(c);
+      const id = conflictIdFn(c);
       const bob = bobMap.get(id);
-      const severityClass = severityFor(c.conflictType);
+      const severityClass = `badge-${severityFor(c.conflictType)}`;
 
-      // Confidence pill
       const confidencePill = bob
         ? `<span class="confidence-pill">${Math.round(bob.confidence * 100)}% confidence</span>`
         : '';
 
-      // Resolution badge from Bob
       const resolutionBadge = bob
         ? `<span class="tag" style="margin-left:4px">${this.esc(bob.resolution)}</span>`
         : '';
 
-      // Affected files
       const files = bob?.affectedFiles ?? [];
       const filesHtml = files.length > 0 ? `
 <div class="section-label">Affected Files</div>
 <ul class="files-list">
-  ${files.slice(0, 5).map(f => `<li><code>${this.esc(f.path)}</code> <span style="opacity:0.6">— ${this.esc(f.reason)}</span></li>`).join('')}
-  ${files.length > 5 ? `<li style="opacity:0.6">…and ${files.length - 5} more</li>` : ''}
+  ${files.slice(0, 5).map(f => `<li><code>${this.esc(f.path)}</code> <span class="muted">-- ${this.esc(f.reason)}</span></li>`).join('')}
+  ${files.length > 5 ? `<li class="muted">...and ${files.length - 5} more</li>` : ''}
 </ul>` : '';
 
-      // Migration plan
       const plan = bob?.migrationPlan ?? [];
       const planHtml = plan.length > 0 ? `
 <div class="section-label">Migration Plan</div>
@@ -267,7 +736,6 @@ ${rollbacks ? `<h2>↩ Rollback SQL</h2>
   ${plan.map(step => `<li>${this.esc(step)}</li>`).join('')}
 </ol>` : '';
 
-      // Risks
       const risks = bob?.risks ?? [];
       const risksHtml = risks.length > 0 ? `
 <div class="section-label">Risks</div>
@@ -283,15 +751,15 @@ ${rollbacks ? `<h2>↩ Rollback SQL</h2>
     <span class="badge ${severityClass}">${this.esc(c.conflictType)}</span>${confidencePill}${resolutionBadge}
   </div>
   <div style="font-size:0.85em;opacity:0.75;margin-bottom:4px">
-    <strong>A:</strong> ${this.esc(c.sourceA)} &nbsp;·&nbsp; <strong>B:</strong> ${this.esc(c.sourceB)}
+    <strong>A:</strong> ${this.esc(c.sourceA)} &nbsp;|&nbsp; <strong>B:</strong> ${this.esc(c.sourceB)}
   </div>
-  <div class="suggestion">💡 ${this.esc(c.suggestion)}</div>
+  <div class="suggestion">Suggestion: ${this.esc(c.suggestion)}</div>
   ${filesHtml}${planHtml}${risksHtml}
 </div>`;
     }).join('');
 
-    const body = `
-<h1>🔀 Database Merge Conflict Report</h1>
+    return `
+<h1>Merge Conflict Report</h1>
 ${bobBanner}
 <p>
   <strong>Schema A:</strong> ${this.esc(r.schemaA.databaseName)}
@@ -300,21 +768,24 @@ ${bobBanner}
 </p>
 <p>
   <strong>Conflicts found:</strong>
-  <span class="badge ${r.conflicts.length > 5 ? 'high' : r.conflicts.length > 0 ? 'medium' : 'low'}">${r.conflicts.length}</span>
+  <span class="badge ${r.conflicts.length > 5 ? 'badge-high' : r.conflicts.length > 0 ? 'badge-medium' : 'badge-low'}">${r.conflicts.length}</span>
   &nbsp; ${typeBreakdown}
 </p>
 
-${conflictCards || '<p>✅ No conflicts detected — schemas are compatible!</p>'}
+${conflictCards || '<p>No conflicts detected -- schemas are compatible.</p>'}
 
 <h2>Reconciliation SQL</h2>
 <pre>${this.esc(r.reconciledSql)}</pre>
 `;
-    return this.baseHtml('Merge Conflict Report', body);
   }
+
+  // --------------------------------------------------
+  // View: Duplicates
+  // --------------------------------------------------
 
   private duplicatesHtml(groups: DuplicateGroup[]): string {
     if (groups.length === 0) {
-      return this.baseHtml('Duplicate Detector', '<h1>🔍 Duplicate Detector</h1><p>✅ No logical duplicates found in the current schema.</p>');
+      return '<h1>Duplicate Detector</h1><p>No logical duplicates found in the current schema.</p>';
     }
 
     const cards = groups.map(g => `
@@ -326,52 +797,40 @@ ${conflictCards || '<p>✅ No conflicts detected — schemas are compatible!</p>
       ${g.columns.map(c => `<tr><td>${this.esc(c.table)}</td><td><code>${this.esc(c.column)}</code></td><td>${this.esc(c.type)}</td><td class="muted">${this.esc(c.reason)}</td></tr>`).join('')}
     </tbody>
   </table>
-  <p>💡 <em>${this.esc(g.suggestion)}</em></p>
+  <p style="margin-top:8px">Suggestion: <em>${this.esc(g.suggestion)}</em></p>
 </div>`).join('');
 
-    const body = `<h1>🔍 Duplicate Detector</h1><p>Found <strong>${groups.length}</strong> semantic duplicate group(s).</p>${cards}`;
-    return this.baseHtml('Duplicate Detector', body);
+    return `<h1>Duplicate Detector</h1><p>Found <strong>${groups.length}</strong> semantic duplicate group(s).</p>${cards}`;
   }
+
+  // --------------------------------------------------
+  // View: History
+  // --------------------------------------------------
 
   private historyHtml(snapshots: SchemaSnapshot[]): string {
     if (snapshots.length === 0) {
-      return this.baseHtml('Schema Timeline', '<h1>📅 Schema Timeline</h1><p>No schema history recorded yet.</p>');
+      return '<h1>Schema Timeline</h1><p>No schema history recorded yet.</p>';
     }
 
     const rows = snapshots.slice().reverse().map(s => `
 <tr>
   <td>${new Date(s.timestamp).toLocaleString()}</td>
   <td>${Object.keys(s.schema.tables).length} tables</td>
-  <td><span class="badge ${s.changeCount > 5 ? 'high' : 'low'}">${s.changeCount} changes</span></td>
+  <td><span class="badge ${s.changeCount > 5 ? 'badge-high' : 'badge-low'}">${s.changeCount} changes</span></td>
 </tr>`).join('');
 
-    const body = `
-<h1>📅 Schema Evolution Timeline</h1>
+    return `
+<h1>Schema Evolution Timeline</h1>
 <p>${snapshots.length} snapshot(s) recorded.</p>
 <table>
   <thead><tr><th>Timestamp</th><th>Tables</th><th>Changes</th></tr></thead>
   <tbody>${rows}</tbody>
 </table>`;
-    return this.baseHtml('Schema Timeline', body);
   }
 
-  private overviewHtml(): string {
-    const body = `
-<h1>🔬 DB-Scope Dashboard</h1>
-<p>AI-powered database lifecycle platform for VS Code.</p>
-<div class="card">
-  <h2>Available Commands</h2>
-  <ul>
-    <li><strong>Analyze Migration Blast Radius</strong> — 4-dimension impact analysis</li>
-    <li><strong>Detect Logical Duplicates</strong> — find phone vs mobile, email vs email_address</li>
-    <li><strong>Analyze Database Merge Conflicts</strong> — compare two schemas</li>
-    <li><strong>Fetch Database Context</strong> — scan codebase for schema definitions</li>
-    <li><strong>Show Schema Timeline</strong> — view schema evolution history</li>
-  </ul>
-</div>
-<p class="muted">Hover over any SQL query in the editor to see instant impact tooltips.</p>`;
-    return this.baseHtml('DB-Scope Overview', body);
-  }
+  // --------------------------------------------------
+  // Utility
+  // --------------------------------------------------
 
   private esc(str: string): string {
     return str

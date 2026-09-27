@@ -44,6 +44,46 @@ class SchemaStateMap {
     getAllTableNames() {
         return this.currentSchema ? Object.keys(this.currentSchema.tables) : [];
     }
+    getRelevantSchema(tableNames) {
+        if (!this.currentSchema)
+            return null;
+        const relevantTables = new Set(tableNames);
+        const addedTables = new Set();
+        for (const tableName of tableNames) {
+            const table = this.currentSchema.tables[tableName];
+            if (table) {
+                for (const col of Object.values(table.columns)) {
+                    if (col.isForeignKey && col.referencesTable) {
+                        addedTables.add(col.referencesTable);
+                    }
+                }
+            }
+        }
+        const allRelevant = new Set([...relevantTables, ...addedTables]);
+        const newSchema = { ...this.currentSchema, tables: {} };
+        for (const tableName of allRelevant) {
+            if (this.currentSchema.tables[tableName]) {
+                newSchema.tables[tableName] = this.currentSchema.tables[tableName];
+            }
+        }
+        return newSchema;
+    }
+    getSchemaSummary() {
+        if (!this.currentSchema) {
+            return { tableCount: 0, columnCount: 0, lastUpdated: null };
+        }
+        let columnCount = 0;
+        const tableNames = Object.keys(this.currentSchema.tables);
+        for (const name of tableNames) {
+            columnCount += Object.keys(this.currentSchema.tables[name].columns).length;
+        }
+        const lastUpdated = this.history.length > 0 ? this.history[this.history.length - 1].timestamp : null;
+        return {
+            tableCount: tableNames.length,
+            columnCount,
+            lastUpdated
+        };
+    }
     // ──────────────────────────────────────────────
     // Storage
     // ──────────────────────────────────────────────

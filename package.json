@@ -1,21 +1,38 @@
 {
   "name": "db-scope",
   "displayName": "DB-Scope: ImpactLens for Databases",
-  "description": "AI-powered database lifecycle platform — blast radius analysis, real-time SQL diagnostics, schema merge conflict resolution, and duplicate detection.",
+  "description": "AI-powered database lifecycle platform — impact analysis, real-time SQL diagnostics, schema merge conflict resolution, and duplicate detection.",
   "version": "0.1.0",
   "publisher": "db-scope-team",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other", "Linters", "Visualization"],
-  "keywords": ["database", "sql", "migration", "schema", "postgresql", "mysql", "oracle"],
-  "activationEvents": ["onLanguage:sql", "onLanguage:typescript", "onLanguage:javascript", "workspaceContains:**/*.sql"],
+  "categories": [
+    "Other",
+    "Linters",
+    "Visualization"
+  ],
+  "keywords": [
+    "database",
+    "sql",
+    "migration",
+    "schema",
+    "postgresql",
+    "mysql",
+    "oracle"
+  ],
+  "activationEvents": [
+    "onLanguage:sql",
+    "onLanguage:typescript",
+    "onLanguage:javascript",
+    "workspaceContains:**/*.sql"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "dbscope.analyzeBlastRadius",
-        "title": "DB-Scope: Analyze Migration Blast Radius"
+        "title": "DB-Scope: Analyze Migration Impact"
       },
       {
         "command": "dbscope.detectDuplicates",
@@ -39,7 +56,7 @@
       },
       {
         "command": "dbscope.exportAnalysis",
-        "title": "DB-Scope: Export Blast Radius Analysis to JSON"
+        "title": "DB-Scope: Export Impact Analysis to JSON"
       }
     ],
     "configuration": {
@@ -52,7 +69,11 @@
         },
         "dbscope.dbType": {
           "type": "string",
-          "enum": ["postgresql", "mysql", "oracle"],
+          "enum": [
+            "postgresql",
+            "mysql",
+            "oracle"
+          ],
           "default": "postgresql",
           "description": "Database type"
         },
@@ -137,16 +158,16 @@
     "package": "vsce package"
   },
   "dependencies": {
-    "pg": "^8.11.3",
     "mysql2": "^3.6.5",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "pg": "^8.11.3"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/pg": "^8.10.9",
     "@types/vscode": "^1.90.0",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
     "eslint": "^8.0.0",
     "typescript": "^5.3.0"
   }

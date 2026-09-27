@@ -1,7 +1,7 @@
 # 🔬 DB-Scope — ImpactLens for Databases
 
 > **AI-powered database lifecycle platform built as a VS Code extension.**  
-> Predicts migration blast radius, provides real-time SQL diagnostics, detects schema duplicates, and resolves database merge conflicts — all orchestrated through IBM Bob's parallel subagents.
+> Predicts migration impact, provides real-time SQL diagnostics, detects schema duplicates, and resolves database merge conflicts — all orchestrated through IBM Bob's parallel subagents.
 
 ---
 
@@ -31,7 +31,7 @@ Today, when a developer runs `ALTER TABLE users DROP COLUMN phone`, they don't k
 
 | # | Problem | DB-Scope Solution |
 |---|---------|------------------|
-| 1 | Migration warnings (bad effect on other tables) | **4-Dimension Blast Radius Analyzer** |
+| 1 | Migration warnings (bad effect on other tables) | **4-Dimension Impact Analyzer** |
 | 2 | Hover tooltips showing query impact | **SqlHoverProvider** |
 | 3 | Real-time context + logical error interruption | **ContextManager + SqlDiagnosticProvider** |
 | 4 | Find logical duplicates in schema | **DuplicateDetector** |
@@ -49,7 +49,7 @@ graph TD
     
     C -->|Pruned Schema + SQL| E[watsonx Granite AI]
     
-    subgraph M1 [Member 1: AI Blast Radius Analyzer]
+    subgraph M1 [Member 1: AI Impact Analyzer]
     E -->|Consolidated Prompt| F(Schema Impact)
     E -->|Consolidated Prompt| G(Data Risks)
     E -->|Consolidated Prompt| H(Risk Score)
@@ -72,7 +72,7 @@ graph TD
 - **Context Manager** — auto-scans codebase for schema on startup; updates on every SQL save (500ms debounce)
 - **Status Bar** — live status showing DB-Scope state
 
-### 🔥 Blast Radius Analysis (4 Dimensions)
+### 🔥 Impact Analysis (4 Dimensions)
 1. **Schema Impact** — breaking vs non-breaking changes, cascade effects
 2. **App Dependencies** — scans all `.ts`, `.js`, `.py`, `.java` files for table references
 3. **Data Integrity Risks** — DELETE without WHERE, NOT NULL without DEFAULT, etc.
@@ -91,10 +91,12 @@ graph TD
 - Produces unified merged schema
 
 ### 📊 Dashboard
-- Blast Radius view with color-coded risk score bars
-- Merge Conflict side-by-side table comparison
-- Duplicate Detector grouped results
-- Schema Evolution Timeline
+- **Interactive Tab Navigation** — Seamlessly switch between Overview, Impact Analysis, Merge Analysis, Duplicates, and Timeline without reloading
+- **Overview & Schema Health** — Live stats on table/column counts and AI integration status
+- **Impact Analysis** — Color-coded risk score bars, affected files, and mitigation suggestions
+- **Merge Conflict** — Side-by-side table comparison with AI-enriched resolutions
+- **Duplicate Detector** — Grouped semantic duplicate results
+- **Schema Evolution Timeline** — Historical tracking of schema changes over time
 
 ---
 
@@ -137,6 +139,9 @@ vsce package
 | `dbscope.riskThreshold` | `7` | Risk score (1-10) above which to block |
 | `dbscope.autoFetchContext` | `true` | Auto-scan codebase on startup |
 | `dbscope.diagnosticsEnabled` | `true` | Enable real-time SQL diagnostics |
+| `dbscope.watsonxUrl` | `https://us-south.ml.cloud.ibm.com` | IBM watsonx.ai region URL |
+| `dbscope.watsonxApiKey` | `""` | IBM Cloud API key for watsonx.ai authentication |
+| `dbscope.watsonxProjectId` | `""` | watsonx.ai project ID |
 
 ### Connection String Formats
 ```
@@ -166,8 +171,8 @@ DELETE FROM orders;
 -- ^ Red squiggle + modal popup: "DELETE without WHERE will remove ALL rows"
 ```
 
-### Blast Radius Analysis
-1. Right-click in a SQL file → **DB-Scope: Analyze Migration Blast Radius**
+### Impact Analysis
+1. Right-click in a SQL file → **DB-Scope: Analyze Migration Impact**
 2. Or use the Command Palette: `Ctrl+Shift+P` → `DB-Scope: Analyze`
 
 ### Detect Duplicates
@@ -176,6 +181,14 @@ DELETE FROM orders;
 ### Merge Two Databases
 `Ctrl+Shift+P` → `DB-Scope: Analyze Database Merge Conflicts`  
 Select Schema A file → Select Schema B file → View conflict report
+
+### Manage Context & History
+- **Fetch Database Context**: `Ctrl+Shift+P` → `DB-Scope: Fetch Database Context from Codebase`
+- **View Schema Timeline**: `Ctrl+Shift+P` → `DB-Scope: Show Schema Evolution Timeline`
+- **Open Dashboard**: Click `$(database) DB-Scope` in the status bar or `Ctrl+Shift+P` → `DB-Scope: Open Dashboard`
+
+### Exporting Reports
+`Ctrl+Shift+P` → `DB-Scope: Export Impact Analysis to JSON`
 
 ---
 
@@ -189,7 +202,7 @@ DB-Scope was built **natively with IBM Bob 2.0** and **watsonx.ai Granite**, lev
 |-------------|----------------|
 | **watsonx.ai Granite** | Replaced deterministic regex with Granite for SQL parsing, risk scoring, data integrity checks, and auto-generating rollback SQL. |
 | **Enterprise Token Optimization** | (Member 1) Implemented **Prompt Consolidation** (1 API call instead of 4), **LRU Caching** (0ms latency on repeat hovers), and **Context Pruning** (99% token reduction on large DBs). |
-| **Parallel Subagents** | IBM Bob orchestrated 4 subagents to run simultaneously for the 4-dimension blast radius analysis (schema, apps, data, docs). |
+| **Parallel Subagents** | IBM Bob orchestrated 4 subagents to run simultaneously for the 4-dimension impact analysis (schema, apps, data, docs). |
 | **Custom Modes & MCP** | `schema-analyst` mode for parsing SQL, and GitHub MCP to search the codebase for ORM dependencies across all files. |
 
 Without Bob's orchestration and Granite's enterprise reasoning, this tool would be a naive regex linter. Instead, it is a fully optimized, production-ready AI Senior DBA.
@@ -236,7 +249,7 @@ DB-Scope/
 
 | Member | Responsibility |
 |--------|---------------|
-| **Member 1** | Blast Radius Analyzer + SQL Hover Provider (migration warnings + hover tooltips) |
+| **Member 1** | Impact Analyzer + SQL Hover Provider (migration warnings + hover tooltips) |
 | **Member 2** | Context Manager + Diagnostic Provider + Duplicate Detector (real-time context, interrupts, schema duplicates) |
 | **Member 3** | Merge Analyzer + Project Structure + GitHub repo setup (database merge conflicts) |
 
