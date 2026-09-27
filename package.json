@@ -128,8 +128,12 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js",
+    "test": "node test/member1.run.test.js && node test/member2.run.test.js && node src/mergeAnalyzer/mergeAnalyzer.test.js",
+    "test:member1": "node test/member1.run.test.js",
+    "test:member2": "node test/member2.run.test.js",
+    "test:member3": "node src/mergeAnalyzer/mergeAnalyzer.test.js",
     "lint": "eslint src --ext ts",
+    "lint:fix": "eslint src --ext ts --fix",
     "package": "vsce package"
   },
   "dependencies": {
